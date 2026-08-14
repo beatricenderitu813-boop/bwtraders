@@ -1,1 +1,560 @@
 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BWTraders AI</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: Arial, sans-serif;
+    }
+
+    body {
+      background: #07111f;
+      color: #ffffff;
+      min-height: 100vh;
+    }
+
+    header {
+      background: #0c1b2e;
+      padding: 18px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #1c3654;
+    }
+
+    header h1 {
+      font-size: 22px;
+    }
+
+    .status {
+      background: #123b2b;
+      color: #4dff9a;
+      padding: 7px 12px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: bold;
+    }
+
+    .container {
+      width: 95%;
+      max-width: 1200px;
+      margin: 20px auto;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      background: #0c1b2e;
+      border: 1px solid #1c3654;
+      border-radius: 14px;
+      padding: 18px;
+      box-shadow: 0 8px 25px rgba(0,0,0,0.2);
+    }
+
+    .card h2 {
+      font-size: 17px;
+      margin-bottom: 15px;
+    }
+
+    .symbol {
+      font-size: 21px;
+      font-weight: bold;
+      margin-bottom: 10px;
+    }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      padding: 7px 0;
+      border-bottom: 1px solid #162b43;
+    }
+
+    .row:last-child {
+      border-bottom: none;
+    }
+
+    .bullish {
+      color: #4dff9a;
+    }
+
+    .bearish {
+      color: #ff647c;
+    }
+
+    .wait {
+      color: #ffd166;
+    }
+
+    .score {
+      font-size: 30px;
+      font-weight: bold;
+      margin: 10px 0;
+    }
+
+    .progress {
+      width: 100%;
+      height: 12px;
+      background: #162b43;
+      border-radius: 10px;
+      overflow: hidden;
+      margin-top: 10px;
+    }
+
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: #4dff9a;
+      transition: width 0.5s;
+    }
+
+    .big-profit {
+      font-size: 32px;
+      font-weight: bold;
+      color: #4dff9a;
+    }
+
+    .target {
+      color: #9bb1ca;
+      margin-top: 5px;
+    }
+
+    .buttons {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 15px;
+    }
+
+    button {
+      border: none;
+      border-radius: 9px;
+      padding: 13px 8px;
+      color: white;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    .start {
+      background: #087f5b;
+    }
+
+    .pause {
+      background: #a36a00;
+    }
+
+    .stop {
+      background: #a61b32;
+    }
+
+    button:active {
+      transform: scale(0.97);
+    }
+
+    .alert {
+      padding: 12px;
+      background: #12243a;
+      border-left: 4px solid #ffd166;
+      border-radius: 7px;
+      margin-bottom: 8px;
+    }
+
+    .critical {
+      border-left-color: #ff4757;
+    }
+
+    .success {
+      border-left-color: #4dff9a;
+    }
+
+    .footer {
+      text-align: center;
+      color: #66809e;
+      padding: 30px 10px;
+      font-size: 12px;
+    }
+
+    @media(max-width:600px) {
+      header h1 {
+        font-size: 18px;
+      }
+
+      .buttons {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+<header>
+  <h1>🤖 BWTRADERS AI</h1>
+  <div class="status" id="botStatus">● DEMO ACTIVE</div>
+</header>
+
+<div class="container">
+
+  <div class="grid">
+
+    <!-- EUR/USD -->
+    <div class="card">
+      <div class="symbol">EUR/USD</div>
+
+      <div class="row">
+        <span>H1 Trend</span>
+        <strong class="bullish" id="eurH1">BULLISH</strong>
+      </div>
+
+      <div class="row">
+        <span>M15</span>
+        <strong id="eurM15">CONFIRMING</strong>
+      </div>
+
+      <div class="row">
+        <span>M5</span>
+        <strong id="eurM5">WAIT</strong>
+      </div>
+
+      <div class="row">
+        <span>Signal</span>
+        <strong class="wait" id="eurSignal">WAIT</strong>
+      </div>
+
+      <div class="score" id="eurScore">0/100</div>
+
+      <div class="row">
+        <span>AI Confidence</span>
+        <strong id="eurAI">0%</strong>
+      </div>
+    </div>
+
+
+    <!-- XAU/USD -->
+    <div class="card">
+      <div class="symbol">XAU/USD</div>
+
+      <div class="row">
+        <span>H1 Trend</span>
+        <strong class="bearish" id="goldH1">BEARISH</strong>
+      </div>
+
+      <div class="row">
+        <span>M15</span>
+        <strong id="goldM15">CONFIRMING</strong>
+      </div>
+
+      <div class="row">
+        <span>M5</span>
+        <strong class="wait" id="goldM5">WAIT</strong>
+      </div>
+
+      <div class="row">
+        <span>Signal</span>
+        <strong class="wait" id="goldSignal">WAIT</strong>
+      </div>
+
+      <div class="score" id="goldScore">0/100</div>
+
+      <div class="row">
+        <span>AI Confidence</span>
+        <strong id="goldAI">0%</strong>
+      </div>
+    </div>
+
+
+    <!-- DAILY PERFORMANCE -->
+    <div class="card">
+      <h2>🎯 Daily Performance</h2>
+
+      <div class="big-profit" id="dailyProfit">
+        $0.00
+      </div>
+
+      <div class="target">
+        Target: $400
+      </div>
+
+      <div class="progress">
+        <div class="progress-bar" id="targetProgress"></div>
+      </div>
+
+      <div class="row">
+        <span>Open Trades</span>
+        <strong id="openTrades">0</strong>
+      </div>
+
+      <div class="row">
+        <span>Daily Risk</span>
+        <strong id="dailyRisk">0%</strong>
+      </div>
+
+      <div class="row">
+        <span>Drawdown</span>
+        <strong id="drawdown">0%</strong>
+      </div>
+    </div>
+
+
+    <!-- AI ENGINE -->
+    <div class="card">
+      <h2>🧠 AI Engine</h2>
+
+      <div class="row">
+        <span>Model</span>
+        <strong>BW-AI-001</strong>
+      </div>
+
+      <div class="row">
+        <span>Minimum confidence</span>
+        <strong>98%</strong>
+      </div>
+
+      <div class="row">
+        <span>Model status</span>
+        <strong class="wait" id="aiStatus">WAITING</strong>
+      </div>
+
+      <div class="row">
+        <span>Training</span>
+        <strong>VALIDATION REQUIRED</strong>
+      </div>
+    </div>
+
+
+    <!-- RISK ENGINE -->
+    <div class="card">
+      <h2>🛡️ Risk Engine</h2>
+
+      <div class="row">
+        <span>Risk / trade</span>
+        <strong>0.5%</strong>
+      </div>
+
+      <div class="row">
+        <span>Daily loss limit</span>
+        <strong>2%</strong>
+      </div>
+
+      <div class="row">
+        <span>Max drawdown</span>
+        <strong>5%</strong>
+      </div>
+
+      <div class="row">
+        <span>Loss streak limit</span>
+        <strong>3</strong>
+      </div>
+
+      <div class="row">
+        <span>Risk status</span>
+        <strong class="bullish">SAFE</strong>
+      </div>
+    </div>
+
+
+    <!-- TARGET EXTENSION -->
+    <div class="card">
+      <h2>🚀 Target Extension</h2>
+
+      <div class="row">
+        <span>$400 target</span>
+        <strong id="targetStatus">NOT REACHED</strong>
+      </div>
+
+      <div class="row">
+        <span>Extension</span>
+        <strong class="bullish">ENABLED</strong>
+      </div>
+
+      <div class="row">
+        <span>Required score</span>
+        <strong>90+</strong>
+      </div>
+
+      <div class="row">
+        <span>Required AI confidence</span>
+        <strong>98%+</strong>
+      </div>
+
+      <p style="margin-top:12px;color:#9bb1ca;font-size:13px;">
+        After $400, new trades are allowed only when stricter
+        conditions remain satisfied.
+      </p>
+    </div>
+
+  </div>
+
+
+  <!-- CONTROLS -->
+  <div class="card" style="margin-top:16px;">
+    <h2>🎛️ Bot Controls</h2>
+
+    <div class="buttons">
+      <button class="start" onclick="startBot()">▶ START</button>
+      <button class="pause" onclick="pauseBot()">⏸ PAUSE</button>
+      <button class="stop" onclick="emergencyStop()">🛑 EMERGENCY STOP</button>
+    </div>
+  </div>
+
+
+  <!-- ALERTS -->
+  <div class="card" style="margin-top:16px;">
+    <h2>🔔 Alerts</h2>
+
+    <div id="alerts">
+      <div class="alert">
+        Waiting for MT5 connection...
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="footer">
+  BWTraders AI • DEMO MODE • Risk controls active<br>
+  AI confidence is not a guarantee of trading accuracy or profit.
+</div>
+
+
+<script>
+
+let botRunning = false;
+
+function addAlert(message, type="alert") {
+
+  const alerts = document.getElementById("alerts");
+
+  const div = document.createElement("div");
+
+  div.className = type;
+
+  div.textContent = message;
+
+  alerts.prepend(div);
+}
+
+
+function startBot() {
+
+  botRunning = true;
+
+  document.getElementById("botStatus").textContent =
+    "● DEMO RUNNING";
+
+  addAlert(
+    "🟢 BWTraders started in DEMO mode.",
+    "alert success"
+  );
+}
+
+
+function pauseBot() {
+
+  botRunning = false;
+
+  document.getElementById("botStatus").textContent =
+    "● PAUSED";
+
+  addAlert(
+    "⏸ New entries paused.",
+    "alert"
+  );
+}
+
+
+function emergencyStop() {
+
+  botRunning = false;
+
+  document.getElementById("botStatus").textContent =
+    "● EMERGENCY STOP";
+
+  addAlert(
+    "🔴 EMERGENCY STOP ACTIVATED.",
+    "alert critical"
+  );
+}
+
+
+function updateDashboard(data) {
+
+  if (!data) return;
+
+  if (data.dailyProfit !== undefined) {
+
+    document.getElementById("dailyProfit").textContent =
+      "$" + Number(data.dailyProfit).toFixed(2);
+
+    let progress =
+      (Number(data.dailyProfit) / 400) * 100;
+
+    progress = Math.max(0, Math.min(progress, 100));
+
+    document.getElementById("targetProgress").style.width =
+      progress + "%";
+
+    if (Number(data.dailyProfit) >= 400) {
+
+      document.getElementById("targetStatus").textContent =
+        "TARGET REACHED";
+
+      document.getElementById("targetStatus").className =
+        "bullish";
+
+      addAlert(
+        "🎯 $400 daily target reached. Extension mode requires stricter conditions.",
+        "alert success"
+      );
+    }
+  }
+
+  if (data.openTrades !== undefined)
+    document.getElementById("openTrades").textContent =
+      data.openTrades;
+
+  if (data.drawdown !== undefined)
+    document.getElementById("drawdown").textContent =
+      data.drawdown + "%";
+}
+
+
+// Example live-data endpoint.
+// The backend can later replace this demo function.
+async function loadBackendData() {
+
+  try {
+
+    const response = await fetch("/api/status");
+
+    if (!response.ok) return;
+
+    const data = await response.json();
+
+    updateDashboard(data);
+
+  } catch (error) {
+
+    console.log("Backend not connected yet.");
+
+  }
+}
+
+
+// Refresh dashboard every 5 seconds.
+setInterval(loadBackendData, 5000);
+
+</script>
+
+</body>
+  </html>
