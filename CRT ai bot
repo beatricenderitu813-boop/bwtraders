@@ -1,0 +1,798 @@
+//+------------------------------------------------------------------+
+//|                  BWTraders H1 Candle Bot                         |
+//|                                                                  |
+//| H1 ONLY - One Candle Direction Strategy                          |
+//|                                                                  |
+//| Logic:                                                           |
+//| 1. Read the last CLOSED H1 candle.                               |
+//| 2. Bullish candle = BUY direction.                               |
+//| 3. Bearish candle = SELL direction.                              |
+//| 4. When a trade becomes profitable, track its best price.        |
+//| 5. If profit retraces by the configured number of pips,           |
+//|    close the trade.                                               |
+//| 6. After closure, open a new trade in the current H1 direction.  |
+//|                                                                  |
+//| IMPORTANT: Test on DEMO first.                                   |
+//+------------------------------------------------------------------+
+
+#property strict
+#property version   "1.00"
+#property description "BWTraders H1 Candle Direction Trading EA"
+
+#include <Trade/Trade.mqh>
+
+CTrade trade;
+
+//====================================================================
+// INPUTS
+//====================================================================
+
+//-------------------- GENERAL ---------------------------------------
+
+input string   EA_Name = "BWTraders H1 Candle Bot";
+
+// Master switch
+input bool     TradingEnabled = true;
+
+// Safety switch.
+// Set FALSE while testing.
+// The EA will still work on DEMO when this is false.
+input bool     AllowLiveTrading = false;
+
+// Magic number
+input ulong    MagicNumber = 26082026;
+
+// Symbol.
+// Leave empty to use the chart symbol.
+input string   TradeSymbol = "";
+
+//-------------------- TIMEFRAME -------------------------------------
+
+// Fixed to H1 as requested.
+#define TRADE_TIMEFRAME PERIOD_H1
+
+//-------------------- LOT SETTINGS ----------------------------------
+
+// true = automatically calculate lot size from equity/risk
+// false = use ManualLotSize
+input bool     UseAutoLot = false;
+
+// Manual starting lot
+input double   ManualLotSize = 0.01;
+
+// Risk used only when UseAutoLot = true
+input double   RiskPercent = 0.50;
+
+// Absolute maximum lot size
+input double   MaximumLotSize = 1.00;
+
+//-------------------- PROFIT PROTECTION -----------------------------
+
+// Once trade has been profitable, a retracement of this many pips
+// from the best price causes the trade to close.
+input double   ProfitRetracePips = 2.0;
+
+// Minimum profit in pips required before the retracement protection
+// becomes active.
+input double   MinimumProfitToProtectPips = 0.1;
+
+//-------------------- TRADE LIMITS ----------------------------------
+
+// Maximum number of BWTraders positions on this symbol
+input int      MaximumOpenTrades = 1;
+
+// Allow a new trade after the previous one closes
+input bool     ReEnterAutomatically = true;
+
+//-------------------- RISK PROTECTION -------------------------------
+
+// Maximum permitted daily loss as percentage of start-of-day equity.
+// Set to 0 to disable.
+input double   DailyLossLimitPercent = 2.0;
+
+// Maximum equity drawdown from EA starting equity.
+// Set to 0 to disable.
+input double   MaximumDrawdownPercent = 5.0;
+
+// Maximum consecutive losing trades.
+// Set to 0 to disable.
+input int      MaximumConsecutiveLosses = 3;
+
+//-------------------- MARKET CONDITIONS -----------------------------
+
+// Maximum spread allowed in pips.
+// Set to 0 to disable.
+input double   MaximumSpreadPips = 5.0;
+
+//-------------------- EXECUTION -------------------------------------
+
+input int      SlippagePoints = 20;
+
+// Optional stop loss.
+// 0 = disabled.
+// This is an emergency protective stop, NOT the 2-pip profit
+// protection mechanism.
+input double   EmergencyStopLossPips = 0.0;
+
+// Optional take profit.
+// 0 = disabled.
+input double   TakeProfitPips = 0.0;
+
+//====================================================================
+// GLOBAL VARIABLES
+//====================================================================
+
+string SymbolToTrade;
+
+datetime LastH1CandleTime = 0;
+
+double DayStartEquity = 0.0;
+double EAStartEquity  = 0.0;
+
+int ConsecutiveLosses = 0;
+
+bool EmergencyStop = false;
+
+//====================================================================
+// STRUCTURE FOR TRACKING TRADE PEAK PRICE
+//====================================================================
+
+struct TradePeak
+{
+   ulong  ticket;
+   double peakPrice;
+   bool   activated;
+};
+
+TradePeak Peaks[];
+
+//====================================================================
+// INITIALIZATION
+//====================================================================
+
+int OnInit()
+{
+   SymbolToTrade = TradeSymbol;
+
+   if(SymbolToTrade == "")
+      SymbolToTrade = _Symbol;
+
+   if(!SymbolSelect(SymbolToTrade, true))
+   {
+      Print("BWTraders ERROR: Cannot select symbol: ", SymbolToTrade);
+      return(INIT_FAILED);
+   }
+
+   trade.SetExpertMagicNumber(MagicNumber);
+   trade.SetDeviationInPoints(SlippagePoints);
+
+   EAStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   DayStartEquity = EAStartEquity;
+
+   LastH1CandleTime = iTime(SymbolToTrade, TRADE_TIMEFRAME, 0);
+
+   Print("==============================================");
+   Print("BWTraders H1 Candle Bot started");
+   Print("Symbol: ", SymbolToTrade);
+   Print("Magic: ", MagicNumber);
+   Print("Manual lot: ", ManualLotSize);
+   Print("Auto lot: ", UseAutoLot);
+   Print("Profit retracement: ", ProfitRetracePips, " pips");
+   Print("Maximum trades: ", MaximumOpenTrades);
+   Print("==============================================");
+
+   return(INIT_SUCCEEDED);
+}
+
+//====================================================================
+// DEINITIALIZATION
+//====================================================================
+
+void OnDeinit(const int reason)
+{
+   Print("BWTraders H1 Candle Bot stopped.");
+}
+
+//====================================================================
+// MAIN TICK FUNCTION
+//====================================================================
+
+void OnTick()
+{
+   if(!TradingEnabled)
+      return;
+
+   // Check emergency state
+   if(EmergencyStop)
+      return;
+
+   // Check account safety
+   if(!RiskChecksPassed())
+   {
+      CloseAllBWTradersPositions();
+      EmergencyStop = true;
+
+      Print("BWTraders SAFETY STOP activated.");
+      return;
+   }
+
+   // Manage existing positions first
+   ManagePositions();
+
+   // If no trading allowed after safety checks
+   if(EmergencyStop)
+      return;
+
+   // Check whether trading conditions are acceptable
+   if(!TradingConditionsOK())
+      return;
+
+   // Check whether current H1 candle has changed
+   datetime currentCandle = iTime(SymbolToTrade,
+                                  TRADE_TIMEFRAME,
+                                  0);
+
+   if(currentCandle <= 0)
+      return;
+
+   // We don't need to wait for a new candle to re-enter.
+   // The last CLOSED candle determines the direction.
+   // Therefore entry can occur immediately after startup.
+   if(LastH1CandleTime == 0)
+      LastH1CandleTime = currentCandle;
+
+   // Open trade if required
+   if(ReEnterAutomatically)
+      MaintainTradeDirection();
+}
+
+//====================================================================
+// GET H1 CANDLE DIRECTION
+//====================================================================
+
+int GetH1Direction()
+{
+   // Shift 1 = LAST CLOSED H1 CANDLE
+   double openPrice  = iOpen(SymbolToTrade,
+                             TRADE_TIMEFRAME,
+                             1);
+
+   double closePrice = iClose(SymbolToTrade,
+                              TRADE_TIMEFRAME,
+                              1);
+
+   if(openPrice == 0 || closePrice == 0)
+      return(0);
+
+   // Bullish
+   if(closePrice > openPrice)
+      return(1);
+
+   // Bearish
+   if(closePrice < openPrice)
+      return(-1);
+
+   // Doji / no direction
+   return(0);
+}
+
+//====================================================================
+// MAINTAIN CURRENT CANDLE DIRECTION
+//====================================================================
+
+void MaintainTradeDirection()
+{
+   int direction = GetH1Direction();
+
+   if(direction == 0)
+      return;
+
+   int openTrades = CountBWTradersPositions();
+
+   if(openTrades >= MaximumOpenTrades)
+      return;
+
+   OpenDirectionTrade(direction);
+}
+
+//====================================================================
+// OPEN TRADE
+//====================================================================
+
+bool OpenDirectionTrade(int direction)
+{
+   if(direction == 0)
+      return(false);
+
+   if(!TradingConditionsOK())
+      return(false);
+
+   double lot = CalculateLotSize();
+
+   if(lot <= 0)
+   {
+      Print("BWTraders: Invalid calculated lot.");
+      return(false);
+   }
+
+   lot = NormalizeLot(lot);
+
+   if(lot > MaximumLotSize)
+      lot = NormalizeLot(MaximumLotSize);
+
+   if(lot <= 0)
+      return(false);
+
+   double ask = SymbolInfoDouble(SymbolToTrade, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(SymbolToTrade, SYMBOL_BID);
+
+   if(ask <= 0 || bid <= 0)
+      return(false);
+
+   double point = SymbolInfoDouble(SymbolToTrade, SYMBOL_POINT);
+
+   int digits = (int)SymbolInfoInteger(SymbolToTrade,
+                                       SYMBOL_DIGITS);
+
+   double pip = PipSize();
+
+   double sl = 0;
+   double tp = 0;
+
+   // BUY
+   if(direction == 1)
+   {
+      if(EmergencyStopLossPips > 0)
+         sl = NormalizeDouble(ask -
+                              EmergencyStopLossPips * pip,
+                              digits);
+
+      if(TakeProfitPips > 0)
+         tp = NormalizeDouble(ask +
+                              TakeProfitPips * pip,
+                              digits);
+
+      bool result = trade.Buy(
+         lot,
+         SymbolToTrade,
+         0,
+         sl,
+         tp,
+         "BWTraders H1 BUY"
+      );
+
+      if(result)
+      {
+         Print("BWTraders BUY opened. Lot=", lot);
+         return(true);
+      }
+
+      Print("BUY failed. Retcode=",
+            trade.ResultRetcode(),
+            " ",
+            trade.ResultRetcodeDescription());
+
+      return(false);
+   }
+
+   // SELL
+   if(direction == -1)
+   {
+      if(EmergencyStopLossPips > 0)
+         sl = NormalizeDouble(bid +
+                              EmergencyStopLossPips * pip,
+                              digits);
+
+      if(TakeProfitPips > 0)
+         tp = NormalizeDouble(bid -
+                              TakeProfitPips * pip,
+                              digits);
+
+      bool result = trade.Sell(
+         lot,
+         SymbolToTrade,
+         0,
+         sl,
+         tp,
+         "BWTraders H1 SELL"
+      );
+
+      if(result)
+      {
+         Print("BWTraders SELL opened. Lot=", lot);
+         return(true);
+      }
+
+      Print("SELL failed. Retcode=",
+            trade.ResultRetcode(),
+            " ",
+            trade.ResultRetcodeDescription());
+
+      return(false);
+   }
+
+   return(false);
+}
+
+//====================================================================
+// MANAGE ALL OPEN POSITIONS
+//====================================================================
+
+void ManagePositions()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      string symbol =
+         PositionGetString(POSITION_SYMBOL);
+
+      ulong magic =
+         (ulong)PositionGetInteger(POSITION_MAGIC);
+
+      if(symbol != SymbolToTrade)
+         continue;
+
+      if(magic != MagicNumber)
+         continue;
+
+      ManageSinglePosition(ticket);
+   }
+}
+
+//====================================================================
+// MANAGE SINGLE POSITION
+//====================================================================
+
+void ManageSinglePosition(ulong ticket)
+{
+   if(!PositionSelectByTicket(ticket))
+      return;
+
+   long type =
+      PositionGetInteger(POSITION_TYPE);
+
+   double openPrice =
+      PositionGetDouble(POSITION_PRICE_OPEN);
+
+   double currentPrice = 0;
+
+   if(type == POSITION_TYPE_BUY)
+      currentPrice =
+         SymbolInfoDouble(SymbolToTrade, SYMBOL_BID);
+   else
+      currentPrice =
+         SymbolInfoDouble(SymbolToTrade, SYMBOL_ASK);
+
+   if(currentPrice <= 0)
+      return;
+
+   double pip = PipSize();
+
+   double profitPips = 0;
+
+   if(type == POSITION_TYPE_BUY)
+      profitPips =
+         (currentPrice - openPrice) / pip;
+   else
+      profitPips =
+         (openPrice - currentPrice) / pip;
+
+   //----------------------------------------------------------------
+   // PROFIT PROTECTION
+   //----------------------------------------------------------------
+
+   if(profitPips >= MinimumProfitToProtectPips)
+   {
+      int index = FindPeak(ticket);
+
+      if(index < 0)
+      {
+         index = AddPeak(ticket,
+                         currentPrice,
+                         true);
+      }
+
+      if(index >= 0)
+      {
+         // BUY: highest price is the peak
+         if(type == POSITION_TYPE_BUY)
+         {
+            if(currentPrice > Peaks[index].peakPrice)
+               Peaks[index].peakPrice = currentPrice;
+         }
+
+         // SELL: lowest price is the peak
+         if(type == POSITION_TYPE_SELL)
+         {
+            if(currentPrice < Peaks[index].peakPrice)
+               Peaks[index].peakPrice = currentPrice;
+         }
+
+         //----------------------------------------------------------------
+         // CLOSE AFTER 2-PIP RETRACEMENT FROM BEST PROFIT
+         //----------------------------------------------------------------
+
+         double retracementPips = 0;
+
+         if(type == POSITION_TYPE_BUY)
+         {
+            retracementPips =
+               (Peaks[index].peakPrice -
+                currentPrice) / pip;
+         }
+         else
+         {
+            retracementPips =
+               (currentPrice -
+                Peaks[index].peakPrice) / pip;
+         }
+
+         if(retracementPips >= ProfitRetracePips)
+         {
+            Print("BWTraders profit protection triggered. ",
+                  "Ticket=", ticket,
+                  " ProfitPips=", profitPips,
+                  " Retracement=", retracementPips);
+
+            ClosePosition(ticket);
+
+            RemovePeak(ticket);
+
+            // A new trade will be opened by OnTick()
+            // in the current CLOSED H1 candle direction.
+
+            return;
+         }
+      }
+   }
+}
+
+//====================================================================
+// CLOSE POSITION
+//====================================================================
+
+bool ClosePosition(ulong ticket)
+{
+   if(!PositionSelectByTicket(ticket))
+      return(false);
+
+   bool result = trade.PositionClose(ticket);
+
+   if(result)
+   {
+      Print("BWTraders position closed. Ticket=", ticket);
+      return(true);
+   }
+
+   Print("Position close failed. Ticket=",
+         ticket,
+         " Retcode=",
+         trade.ResultRetcode(),
+         " ",
+         trade.ResultRetcodeDescription());
+
+   return(false);
+}
+
+//====================================================================
+// CLOSE ALL BWTRADERS POSITIONS
+//====================================================================
+
+void CloseAllBWTradersPositions()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL)
+         != SymbolToTrade)
+         continue;
+
+      if((ulong)PositionGetInteger(POSITION_MAGIC)
+         != MagicNumber)
+         continue;
+
+      ClosePosition(ticket);
+   }
+}
+
+//====================================================================
+// COUNT BWTRADERS POSITIONS
+//====================================================================
+
+int CountBWTradersPositions()
+{
+   int count = 0;
+
+   for(int i = 0; i < PositionsTotal(); i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL)
+         != SymbolToTrade)
+         continue;
+
+      if((ulong)PositionGetInteger(POSITION_MAGIC)
+         != MagicNumber)
+         continue;
+
+      count++;
+   }
+
+   return(count);
+}
+
+//====================================================================
+// PIP SIZE
+//====================================================================
+
+double PipSize()
+{
+   double point =
+      SymbolInfoDouble(SymbolToTrade,
+                       SYMBOL_POINT);
+
+   int digits =
+      (int)SymbolInfoInteger(SymbolToTrade,
+                             SYMBOL_DIGITS);
+
+   // Standard FX:
+   // 5 digits = 10 points per pip
+   // 3 digits = 10 points per pip
+   if(digits == 3 || digits == 5)
+      return(point * 10.0);
+
+   return(point);
+}
+
+//====================================================================
+// LOT CALCULATION
+//====================================================================
+
+double CalculateLotSize()
+{
+   // Manual lot
+   if(!UseAutoLot)
+      return(NormalizeLot(ManualLotSize));
+
+   //----------------------------------------------------------------
+   // AUTO LOT
+   //----------------------------------------------------------------
+
+   double equity =
+      AccountInfoDouble(ACCOUNT_EQUITY);
+
+   if(equity <= 0)
+      return(0);
+
+   double riskMoney =
+      equity * RiskPercent / 100.0;
+
+   // If no emergency SL is supplied, use a conservative
+   // reference distance for calculating the lot.
+   double riskPips = EmergencyStopLossPips;
+
+   if(riskPips <= 0)
+      riskPips = 20.0;
+
+   double pip = PipSize();
+
+   double tickSize =
+      SymbolInfoDouble(SymbolToTrade,
+                       SYMBOL_TRADE_TICK_SIZE);
+
+   double tickValue =
+      SymbolInfoDouble(SymbolToTrade,
+                       SYMBOL_TRADE_TICK_VALUE);
+
+   if(tickSize <= 0 || tickValue <= 0)
+      return(NormalizeLot(ManualLotSize));
+
+   double moneyPerPipPerLot =
+      (pip / tickSize) * tickValue;
+
+   if(moneyPerPipPerLot <= 0)
+      return(NormalizeLot(ManualLotSize));
+
+   double lot =
+      riskMoney /
+      (riskPips * moneyPerPipPerLot);
+
+   if(lot > MaximumLotSize)
+      lot = MaximumLotSize;
+
+   return(NormalizeLot(lot));
+}
+
+//====================================================================
+// NORMALIZE LOT
+//====================================================================
+
+double NormalizeLot(double lot)
+{
+   double minLot =
+      SymbolInfoDouble(SymbolToTrade,
+                       SYMBOL_VOLUME_MIN);
+
+   double maxLot =
+      SymbolInfoDouble(SymbolToTrade,
+                       SYMBOL_VOLUME_MAX);
+
+   double step =
+      SymbolInfoDouble(SymbolToTrade,
+                       SYMBOL_VOLUME_STEP);
+
+   if(step <= 0)
+      step = minLot;
+
+   if(lot < minLot)
+      lot = minLot;
+
+   if(lot > maxLot)
+      lot = maxLot;
+
+   if(lot > MaximumLotSize)
+      lot = MaximumLotSize;
+
+   lot =
+      MathFloor(lot / step) * step;
+
+   int volumeDigits = 2;
+
+   if(step == 1.0)
+      volumeDigits = 0;
+   else if(step == 0.1)
+      volumeDigits = 1;
+   else if(step == 0.01)
+      volumeDigits = 2;
+   else if(step == 0.001)
+      volumeDigits = 3;
+
+   return(NormalizeDouble(lot,
+                          volumeDigits));
+}
+
+//====================================================================
+// TRADING CONDITIONS
+//====================================================================
+
+bool TradingConditionsOK()
+{
+   if(!TradingEnabled)
+      return(false);
+
+   if(EmergencyStop)
+      return(false);
+
+   //----------------------------------------------------------------
+   // LIVE ACCOUNT SAFETY
+   //----------------------------------------------------------------
+
+   ENUM_ACCOUNT_TRADE_MODE mode =
+      (ENUM_ACCOUNT_TRADE_MODE)
+      AccountInfoInteger(ACCOUNT_TRADE_MODE);
+
+   if(mode == ACCOUNT_TRADE_MODE_REAL &&
+      !AllowLiveTrading)
+   {
+ 
