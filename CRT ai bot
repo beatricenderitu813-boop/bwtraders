@@ -1,67 +1,106 @@
 //+------------------------------------------------------------------+
-//| CRT_AI_BOT_v5_Broker_Determined_Demo_Live.mq5                   |
-//| Broker-independent multi-position trading EA                    |
-//| DEMO/REAL is determined by the MT5 account currently connected. |
+//| CRT AI BOT - M1 FLIPPING ROBOT                                  |
+//| Current candle direction - real-time flipping                   |
 //+------------------------------------------------------------------+
 #property strict
-#property version "5.00"
+#property version "6.00"
 
 #include <Trade/Trade.mqh>
+
 CTrade trade;
 
-//---------------- SYMBOL / SIGNAL -----------------
-input string TradingSymbol = ""; // blank = chart symbol
+//==================================================================
+// SYMBOL
+//==================================================================
 
-// Select timeframe directly from MT5 Inputs.
-input ENUM_TIMEFRAMES SignalTimeframe = PERIOD_H1;
+input string TradingSymbol = "";     // Blank = chart symbol
 
-// Examples:
-// PERIOD_M1
-// PERIOD_M5
-// PERIOD_M15
-// PERIOD_M30
-// PERIOD_H1
-// PERIOD_H4
-// PERIOD_D1
-// PERIOD_W1
-// PERIOD_MN1
+//==================================================================
+// LOT SIZE
+//==================================================================
 
-// One completed candle on the selected timeframe creates one cycle.
-input int OrdersPerSignal = 5;
-input double LotSizePerOrder = 0.01;
-input int MaximumOpenPositions = 20;
-input double MaximumTotalLots = 1.00;
-input bool AutomaticReEntry = true;
+// Dynamic lot formula:
+// $10   = 0.01 lot
+// $100  = 0.10 lot
+// $1000 = 1.00 lot
+// $2000 = 2.00 lot
 
-//---------------- EXECUTION -----------------------
-input double MaximumSpreadPips = 5.0;
+input double LotMultiplier = 0.001;
+
+// Number of trades opened when a new direction is created.
+input int OrdersPerSignal = 1;
+
+// Maximum number of EA positions on this symbol.
+input int MaximumOpenPositions = 1;
+
+// Maximum total lots for this EA.
+// 0 = disabled.
+input double MaximumEAExposureLots = 10.0;
+
+//==================================================================
+// FLIPPING / PROFIT PROTECTION
+//==================================================================
+
+// Minimum floating profit required before a reversal can close
+// the current trade.
+//
+// Example:
+// 0.01 = one cent of account currency.
+//
+// This prevents the EA from treating an almost-zero floating
+// value as meaningful profit.
+input double MinimumProfitToProtect = 0.01;
+
+//==================================================================
+// EXECUTION
+//==================================================================
+
 input int SlippagePoints = 20;
 
-//---------------- EXIT -----------------------------
+//==================================================================
+// OPTIONAL SL / TP
+//==================================================================
+
 // 0 = disabled.
-input double BasketProfitTarget = 0.0;
-input double BasketLossLimit = 0.0;
+// The main exit is the profitable reversal.
+
 input double StopLossPips = 0.0;
 input double TakeProfitPips = 0.0;
 
-//---------------- RISK -----------------------------
+//==================================================================
+// RISK PROTECTION
+//==================================================================
+
 input double DailyLossLimitPercent = 2.0;
 input double MaximumDrawdownPercent = 5.0;
 input int MaximumConsecutiveLosses = 3;
-input double MaximumEAExposureLots = 10.0;
 
-//---------------- ID -------------------------------
+//==================================================================
+// MAGIC NUMBER
+//==================================================================
+
 input ulong MagicNumber = 26082026;
 
-datetime lastClosedBar = 0;
-double dayStartEquity = 0.0;
-int savedDay = -1;
-int consecutiveLosses = 0;
+//==================================================================
+// INTERNAL VARIABLES
+//==================================================================
+
+bool tradingEnabled = false;
 bool tradingLocked = false;
 
-//+------------------------------------------------------------------+
-//| Return trading symbol                                            |
-//+------------------------------------------------------------------+
+double dayStartEquity = 0.0;
+
+int savedDay = -1;
+int consecutiveLosses = 0;
+
+string START_BUTTON = "CRT_START_BUTTON";
+string STOP_BUTTON  = "CRT_STOP_BUTTON";
+string STATUS_LABEL = "CRT_STATUS_LABEL";
+
+//==================================================================
+// RETURN SYMBOL
+//==================================================================
+
 string Sym()
 {
    if(TradingSymbol == "")
@@ -70,13 +109,19 @@ string Sym()
    return TradingSymbol;
 }
 
-//+------------------------------------------------------------------+
-//| Pip size                                                         |
-//+------------------------------------------------------------------+
+//==================================================================
+// PIP SIZE
+//==================================================================
+
 double PipSize(string s)
 {
    double point = SymbolInfoDouble(s, SYMBOL_POINT);
-   int digits = (int)SymbolInfoInteger(s, SYMBOL_DIGITS);
+
+   int digits =
+      (int)SymbolInfoInteger(
+         s,
+         SYMBOL_DIGITS
+      );
 
    if(point <= 0)
       return 0;
@@ -87,25 +132,55 @@ double PipSize(string s)
    return point;
 }
 
-//+------------------------------------------------------------------+
-//| Normalize volume                                                 |
-//+------------------------------------------------------------------+
-double NormalizeVolume(string s, double v)
-{
-   double minv = SymbolInfoDouble(s, SYMBOL_VOLUME_MIN);
-   double maxv = SymbolInfoDouble(s, SYMBOL_VOLUME_MAX);
-   double step = SymbolInfoDouble(s, SYMBOL_VOLUME_STEP);
+//==================================================================
+// NORMALIZE LOT
+//==================================================================
 
-   if(minv <= 0 || maxv <= 0)
+double NormalizeVolume(string s, double volume)
+{
+   double minVolume =
+      SymbolInfoDouble(
+         s,
+         SYMBOL_VOLUME_MIN
+      );
+
+   double maxVolume =
+      SymbolInfoDouble(
+         s,
+         SYMBOL_VOLUME_MAX
+      );
+
+   double step =
+      SymbolInfoDouble(
+         s,
+         SYMBOL_VOLUME_STEP
+      );
+
+   if(minVolume <= 0 ||
+      maxVolume <= 0)
+   {
       return 0;
+   }
 
    if(step <= 0)
-      step = minv;
+      step = minVolume;
 
-   v = MathMax(v, minv);
-   v = MathMin(v, maxv);
+   volume =
+      MathMax(
+         volume,
+         minVolume
+      );
 
-   v = MathFloor(v / step + 1e-9) * step;
+   volume =
+      MathMin(
+         volume,
+         maxVolume
+      );
+
+   volume =
+      MathFloor(
+         volume / step + 1e-9
+      ) * step;
 
    int digits = 2;
 
@@ -115,35 +190,55 @@ double NormalizeVolume(string s, double v)
    if(step < 0.001)
       digits = 4;
 
-   return NormalizeDouble(v, digits);
+   return NormalizeDouble(
+      volume,
+      digits
+   );
 }
 
-//+------------------------------------------------------------------+
-//| Current spread in pips                                           |
-//+------------------------------------------------------------------+
-double SpreadPips(string s)
+//==================================================================
+// DYNAMIC LOT SIZE
+//==================================================================
+
+double CalculateDynamicLot()
 {
-   double ask = SymbolInfoDouble(s, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(s, SYMBOL_BID);
-   double pip = PipSize(s);
-
-   if(ask <= 0 || bid <= 0 || pip <= 0)
-      return 999999;
-
-   return (ask - bid) / pip;
-}
-
-//+------------------------------------------------------------------+
-//| Count EA positions                                               |
-//+------------------------------------------------------------------+
-int CountPositions()
-{
-   int n = 0;
    string s = Sym();
 
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   double balance =
+      AccountInfoDouble(
+         ACCOUNT_BALANCE
+      );
+
+   double rawLot =
+      balance * LotMultiplier;
+
+   double lot =
+      NormalizeVolume(
+         s,
+         rawLot
+      );
+
+   return lot;
+}
+
+//==================================================================
+// COUNT EA POSITIONS
+//==================================================================
+
+int CountPositions()
+{
+   int count = 0;
+
+   string s = Sym();
+
+   for(
+      int i = PositionsTotal() - 1;
+      i >= 0;
+      i--
+   )
    {
-      ulong ticket = PositionGetTicket(i);
+      ulong ticket =
+         PositionGetTicket(i);
 
       if(ticket == 0)
          continue;
@@ -151,29 +246,46 @@ int CountPositions()
       if(!PositionSelectByTicket(ticket))
          continue;
 
-      if(PositionGetString(POSITION_SYMBOL) != s)
+      if(
+         PositionGetString(
+            POSITION_SYMBOL
+         ) != s
+      )
          continue;
 
-      if((ulong)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      if(
+         (ulong)PositionGetInteger(
+            POSITION_MAGIC
+         ) != MagicNumber
+      )
+      {
          continue;
+      }
 
-      n++;
+      count++;
    }
 
-   return n;
+   return count;
 }
 
-//+------------------------------------------------------------------+
-//| Total EA lots                                                    |
-//+------------------------------------------------------------------+
+//==================================================================
+// TOTAL EA LOTS
+//==================================================================
+
 double TotalLots()
 {
    double lots = 0;
+
    string s = Sym();
 
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   for(
+      int i = PositionsTotal() - 1;
+      i >= 0;
+      i--
+   )
    {
-      ulong ticket = PositionGetTicket(i);
+      ulong ticket =
+         PositionGetTicket(i);
 
       if(ticket == 0)
          continue;
@@ -181,29 +293,51 @@ double TotalLots()
       if(!PositionSelectByTicket(ticket))
          continue;
 
-      if(PositionGetString(POSITION_SYMBOL) != s)
+      if(
+         PositionGetString(
+            POSITION_SYMBOL
+         ) != s
+      )
+      {
          continue;
+      }
 
-      if((ulong)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      if(
+         (ulong)PositionGetInteger(
+            POSITION_MAGIC
+         ) != MagicNumber
+      )
+      {
          continue;
+      }
 
-      lots += PositionGetDouble(POSITION_VOLUME);
+      lots +=
+         PositionGetDouble(
+            POSITION_VOLUME
+         );
    }
 
    return lots;
 }
 
-//+------------------------------------------------------------------+
-//| Basket profit                                                    |
-//+------------------------------------------------------------------+
+//==================================================================
+// BASKET PROFIT
+//==================================================================
+
 double BasketProfit()
 {
-   double p = 0;
+   double profit = 0;
+
    string s = Sym();
 
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   for(
+      int i = PositionsTotal() - 1;
+      i >= 0;
+      i--
+   )
    {
-      ulong ticket = PositionGetTicket(i);
+      ulong ticket =
+         PositionGetTicket(i);
 
       if(ticket == 0)
          continue;
@@ -211,31 +345,61 @@ double BasketProfit()
       if(!PositionSelectByTicket(ticket))
          continue;
 
-      if(PositionGetString(POSITION_SYMBOL) != s)
+      if(
+         PositionGetString(
+            POSITION_SYMBOL
+         ) != s
+      )
+      {
          continue;
+      }
 
-      if((ulong)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      if(
+         (ulong)PositionGetInteger(
+            POSITION_MAGIC
+         ) != MagicNumber
+      )
+      {
          continue;
+      }
 
-      p += PositionGetDouble(POSITION_PROFIT);
-      p += PositionGetDouble(POSITION_SWAP);
+      profit +=
+         PositionGetDouble(
+            POSITION_PROFIT
+         );
+
+      profit +=
+         PositionGetDouble(
+            POSITION_SWAP
+         );
    }
 
-   return p;
+   return profit;
 }
 
-//+------------------------------------------------------------------+
-//| Close all EA positions                                           |
-//+------------------------------------------------------------------+
-void CloseAll(string reason)
+//==================================================================
+// CLOSE ALL EA POSITIONS
+//==================================================================
+
+bool CloseAll(string reason)
 {
-   Print("Closing CRT basket: ", reason);
+   Print(
+      "CRT AI BOT closing positions: ",
+      reason
+   );
+
+   bool allClosed = true;
 
    string s = Sym();
 
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   for(
+      int i = PositionsTotal() - 1;
+      i >= 0;
+      i--
+   )
    {
-      ulong ticket = PositionGetTicket(i);
+      ulong ticket =
+         PositionGetTicket(i);
 
       if(ticket == 0)
          continue;
@@ -243,14 +407,30 @@ void CloseAll(string reason)
       if(!PositionSelectByTicket(ticket))
          continue;
 
-      if(PositionGetString(POSITION_SYMBOL) != s)
-         continue;
-
-      if((ulong)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
-         continue;
-
-      if(!trade.PositionClose(ticket))
+      if(
+         PositionGetString(
+            POSITION_SYMBOL
+         ) != s
+      )
       {
+         continue;
+      }
+
+      if(
+         (ulong)PositionGetInteger(
+            POSITION_MAGIC
+         ) != MagicNumber
+      )
+      {
+         continue;
+      }
+
+      if(
+         !trade.PositionClose(ticket)
+      )
+      {
+         allClosed = false;
+
          Print(
             "Close failed #",
             ticket,
@@ -259,71 +439,42 @@ void CloseAll(string reason)
          );
       }
    }
+
+   return allClosed;
 }
 
-//+------------------------------------------------------------------+
-//| Update daily information                                         |
-//+------------------------------------------------------------------+
+//==================================================================
+// UPDATE DAY
+//==================================================================
+
 void UpdateDay()
 {
    MqlDateTime tm;
 
-   TimeToStruct(TimeCurrent(), tm);
+   TimeToStruct(
+      TimeCurrent(),
+      tm
+   );
 
    if(savedDay != tm.day)
    {
       savedDay = tm.day;
 
       dayStartEquity =
-         AccountInfoDouble(ACCOUNT_EQUITY);
+         AccountInfoDouble(
+            ACCOUNT_EQUITY
+         );
 
       consecutiveLosses = 0;
+
       tradingLocked = false;
    }
 }
 
-//+------------------------------------------------------------------+
-//| Determine account currently connected to MT5                     |
-//+------------------------------------------------------------------+
-bool AccountOK()
-{
-   long mode =
-      AccountInfoInteger(ACCOUNT_TRADE_MODE);
+//==================================================================
+// RISK CHECK
+//==================================================================
 
-   // DEMO or REAL is determined automatically by the
-   // account currently connected to this MT5 terminal.
-
-   if(mode == ACCOUNT_TRADE_MODE_REAL)
-   {
-      Print(
-         "MT5 account type: REAL. ",
-         "Using connected REAL account."
-      );
-
-      return true;
-   }
-
-   if(mode == ACCOUNT_TRADE_MODE_DEMO)
-   {
-      Print(
-         "MT5 account type: DEMO. ",
-         "Using connected DEMO account."
-      );
-
-      return true;
-   }
-
-   Print(
-      "SAFETY STOP: MT5 account type ",
-      "could not be identified."
-   );
-
-   return false;
-}
-
-//+------------------------------------------------------------------+
-//| Risk checks                                                      |
-//+------------------------------------------------------------------+
 bool RiskOK()
 {
    UpdateDay();
@@ -332,52 +483,98 @@ bool RiskOK()
       return false;
 
    double equity =
-      AccountInfoDouble(ACCOUNT_EQUITY);
+      AccountInfoDouble(
+         ACCOUNT_EQUITY
+      );
 
    double balance =
-      AccountInfoDouble(ACCOUNT_BALANCE);
+      AccountInfoDouble(
+         ACCOUNT_BALANCE
+      );
 
-   // Daily loss protection
-   if(DailyLossLimitPercent > 0 &&
-      dayStartEquity > 0)
+   //--------------------------------------------------------------
+   // DAILY LOSS
+   //--------------------------------------------------------------
+
+   if(
+      DailyLossLimitPercent > 0 &&
+      dayStartEquity > 0
+   )
    {
-      double loss =
-         (dayStartEquity - equity)
-         / dayStartEquity * 100.0;
+      double lossPercent =
+         (
+            dayStartEquity - equity
+         )
+         /
+         dayStartEquity
+         *
+         100.0;
 
-      if(loss >= DailyLossLimitPercent)
+      if(
+         lossPercent >=
+         DailyLossLimitPercent
+      )
       {
          tradingLocked = true;
 
-         CloseAll("daily loss limit");
+         CloseAll(
+            "DAILY LOSS LIMIT"
+         );
+
+         UpdateStatus();
 
          return false;
       }
    }
 
-   // Drawdown protection
-   if(MaximumDrawdownPercent > 0 &&
-      balance > 0)
-   {
-      double dd =
-         (balance - equity)
-         / balance * 100.0;
+   //--------------------------------------------------------------
+   // DRAWDOWN
+   //--------------------------------------------------------------
 
-      if(dd >= MaximumDrawdownPercent)
+   if(
+      MaximumDrawdownPercent > 0 &&
+      balance > 0
+   )
+   {
+      double drawdown =
+         (
+            balance - equity
+         )
+         /
+         balance
+         *
+         100.0;
+
+      if(
+         drawdown >=
+         MaximumDrawdownPercent
+      )
       {
          tradingLocked = true;
 
-         CloseAll("maximum drawdown");
+         CloseAll(
+            "MAXIMUM DRAWDOWN"
+         );
+
+         UpdateStatus();
 
          return false;
       }
    }
 
-   // Consecutive loss protection
-   if(MaximumConsecutiveLosses > 0 &&
-      consecutiveLosses >= MaximumConsecutiveLosses)
+   //--------------------------------------------------------------
+   // CONSECUTIVE LOSSES
+   //--------------------------------------------------------------
+
+   if(
+      MaximumConsecutiveLosses > 0 &&
+      consecutiveLosses >=
+      MaximumConsecutiveLosses
+   )
    {
       tradingLocked = true;
+
+      UpdateStatus();
 
       return false;
    }
@@ -385,45 +582,68 @@ bool RiskOK()
    return true;
 }
 
-//+------------------------------------------------------------------+
-//| Read last completed candle                                       |
-//+------------------------------------------------------------------+
-int ClosedCandleSignal(datetime &barTime)
-{
-   MqlRates r[2];
+//==================================================================
+// CURRENT M1 CANDLE DIRECTION
+//==================================================================
 
-   ArraySetAsSeries(r, true);
+// Returns:
+//  1 = bullish
+// -1 = bearish
+//  0 = doji
+
+int CurrentCandleDirection()
+{
+   string s = Sym();
+
+   MqlRates rates[];
+
+   ArraySetAsSeries(
+      rates,
+      true
+   );
 
    if(
       CopyRates(
-         Sym(),
-         SignalTimeframe,
+         s,
+         PERIOD_M1,
          0,
-         2,
-         r
-      ) < 2
+         1,
+         rates
+      ) < 1
    )
    {
       return 0;
    }
 
-   // r[1] = last completed candle
-   barTime = r[1].time;
+   // rates[0] is the CURRENT FORMING M1 candle.
 
-   if(r[1].close > r[1].open)
+   if(
+      rates[0].close >
+      rates[0].open
+   )
+   {
       return 1;
+   }
 
-   if(r[1].close < r[1].open)
+   if(
+      rates[0].close <
+      rates[0].open
+   )
+   {
       return -1;
+   }
 
-   // Doji
    return 0;
 }
 
-//+------------------------------------------------------------------+
-//| Open one trade                                                   |
-//+------------------------------------------------------------------+
-bool OpenOne(bool buy, double volume)
+//==================================================================
+// OPEN ONE TRADE
+//==================================================================
+
+bool OpenOne(
+   bool buy,
+   double volume
+)
 {
    string s = Sym();
 
@@ -448,19 +668,32 @@ bool OpenOne(bool buy, double volume)
          SYMBOL_DIGITS
       );
 
-   if(ask <= 0 || bid <= 0)
+   if(
+      ask <= 0 ||
+      bid <= 0
+   )
+   {
       return false;
+   }
 
    double sl = 0;
    double tp = 0;
 
-   if(StopLossPips > 0 && pip > 0)
+   //--------------------------------------------------------------
+   // STOP LOSS
+   //--------------------------------------------------------------
+
+   if(
+      StopLossPips > 0 &&
+      pip > 0
+   )
    {
       if(buy)
       {
          sl =
             NormalizeDouble(
-               ask - StopLossPips * pip,
+               ask -
+               StopLossPips * pip,
                digits
             );
       }
@@ -468,19 +701,28 @@ bool OpenOne(bool buy, double volume)
       {
          sl =
             NormalizeDouble(
-               bid + StopLossPips * pip,
+               bid +
+               StopLossPips * pip,
                digits
             );
       }
    }
 
-   if(TakeProfitPips > 0 && pip > 0)
+   //--------------------------------------------------------------
+   // TAKE PROFIT
+   //--------------------------------------------------------------
+
+   if(
+      TakeProfitPips > 0 &&
+      pip > 0
+   )
    {
       if(buy)
       {
          tp =
             NormalizeDouble(
-               ask + TakeProfitPips * pip,
+               ask +
+               TakeProfitPips * pip,
                digits
             );
       }
@@ -488,46 +730,66 @@ bool OpenOne(bool buy, double volume)
       {
          tp =
             NormalizeDouble(
-               bid - TakeProfitPips * pip,
+               bid -
+               TakeProfitPips * pip,
                digits
             );
       }
    }
 
-   trade.SetExpertMagicNumber(MagicNumber);
+   //--------------------------------------------------------------
+   // TRADE SETTINGS
+   //--------------------------------------------------------------
+
+   trade.SetExpertMagicNumber(
+      MagicNumber
+   );
 
    trade.SetDeviationInPoints(
       SlippagePoints
    );
 
-   bool ok;
+   bool result = false;
+
+   //--------------------------------------------------------------
+   // BUY
+   //--------------------------------------------------------------
 
    if(buy)
    {
-      ok =
+      result =
          trade.Buy(
             volume,
             s,
             0,
             sl,
             tp,
-            "CRT BUY"
+            "CRT M1 FLIP BUY"
          );
    }
+
+   //--------------------------------------------------------------
+   // SELL
+   //--------------------------------------------------------------
+
    else
    {
-      ok =
+      result =
          trade.Sell(
             volume,
             s,
             0,
             sl,
             tp,
-            "CRT SELL"
+            "CRT M1 FLIP SELL"
          );
    }
 
-   if(!ok)
+   //--------------------------------------------------------------
+   // RESULT
+   //--------------------------------------------------------------
+
+   if(!result)
    {
       Print(
          "Order failed: ",
@@ -540,23 +802,30 @@ bool OpenOne(bool buy, double volume)
    }
 
    Print(
-      "Opened ",
+      "CRT AI BOT opened ",
       buy ? "BUY" : "SELL",
-      " lot=",
-      DoubleToString(volume,2),
-      " order=",
-      trade.ResultOrder()
+      " | Lot = ",
+      DoubleToString(
+         volume,
+         2
+      )
    );
 
    return true;
 }
 
-//+------------------------------------------------------------------+
-//| Start new trading cycle                                          |
-//+------------------------------------------------------------------+
-void StartCycle(bool buy, datetime barTime)
+//==================================================================
+// OPEN CURRENT DIRECTION
+//==================================================================
+
+void OpenCurrentDirection(
+   int direction
+)
 {
-   if(!AccountOK())
+   if(direction == 0)
+      return;
+
+   if(!tradingEnabled)
       return;
 
    if(!RiskOK())
@@ -574,91 +843,98 @@ void StartCycle(bool buy, datetime barTime)
       return;
    }
 
-   double spread =
-      SpreadPips(s);
+   //--------------------------------------------------------------
+   // CHECK POSITION LIMIT
+   //--------------------------------------------------------------
 
-   if(spread > MaximumSpreadPips)
+   int currentPositions =
+      CountPositions();
+
+   if(
+      currentPositions >=
+      MaximumOpenPositions
+   )
+   {
+      return;
+   }
+
+   //--------------------------------------------------------------
+   // CALCULATE DYNAMIC LOT
+   //--------------------------------------------------------------
+
+   double volume =
+      CalculateDynamicLot();
+
+   if(volume <= 0)
    {
       Print(
-         "Spread too high: ",
-         DoubleToString(spread,2),
-         " pips"
+         "Dynamic lot calculation returned 0."
       );
 
       return;
    }
 
-   int current =
-      CountPositions();
+   //--------------------------------------------------------------
+   // EXPOSURE LIMIT
+   //--------------------------------------------------------------
 
-   if(current >= MaximumOpenPositions)
-      return;
+   if(
+      MaximumEAExposureLots > 0
+   )
+   {
+      if(
+         TotalLots() +
+         volume >
+         MaximumEAExposureLots +
+         1e-9
+      )
+      {
+         Print(
+            "EA exposure limit reached."
+         );
 
-   double volume =
-      NormalizeVolume(
-         s,
-         LotSizePerOrder
-      );
+         return;
+      }
+   }
 
-   if(volume <= 0)
-      return;
+   //--------------------------------------------------------------
+   // OPEN
+   //--------------------------------------------------------------
 
-   double availableLots =
-      MaximumEAExposureLots -
-      TotalLots();
+   bool buy =
+      direction == 1;
 
-   if(availableLots <= 0)
-      return;
+   int availableSlots =
+      MaximumOpenPositions -
+      currentPositions;
 
-   int slotsByExposure =
-      (int)MathFloor(
-         availableLots / volume + 1e-9
-      );
-
-   int slotsByTotal =
-      (int)MathFloor(
-         MaximumTotalLots / volume + 1e-9
-      );
-
-   int slots =
+   int orders =
       MathMin(
          OrdersPerSignal,
-         MathMin(
-            MaximumOpenPositions - current,
-            MathMin(
-               slotsByExposure,
-               slotsByTotal
-            )
-         )
+         availableSlots
       );
 
-   if(slots <= 0)
+   if(orders <= 0)
       return;
 
-   Print(
-      "NEW ",
-      EnumToString(SignalTimeframe),
-      " CYCLE ",
-      TimeToString(barTime),
-      " Direction=",
-      buy ? "BUY" : "SELL",
-      " Orders=",
-      slots,
-      " Lot=",
-      DoubleToString(volume,2)
-   );
-
-   for(int i = 0; i < slots; i++)
+   for(
+      int i = 0;
+      i < orders;
+      i++
+   )
    {
-      if(!AccountOK())
+      if(!tradingEnabled)
          break;
 
       if(!RiskOK())
          break;
 
       if(
-         TotalLots() + volume >
-         MaximumEAExposureLots + 1e-9
+         MaximumEAExposureLots > 0 &&
+         TotalLots() +
+         volume >
+         MaximumEAExposureLots +
+         1e-9
       )
       {
          break;
@@ -671,297 +947,124 @@ void StartCycle(bool buy, datetime barTime)
    }
 }
 
-//+------------------------------------------------------------------+
-//| Detect new completed candle                                      |
-//+------------------------------------------------------------------+
-void CheckNewBar()
+//==================================================================
+// MANAGE FLIPPING
+//==================================================================
+
+void ManageFlipping()
 {
-   datetime t = 0;
-
-   int signal =
-      ClosedCandleSignal(t);
-
-   if(t == 0)
+   if(!tradingEnabled)
       return;
 
-   if(lastClosedBar == 0)
+   if(tradingLocked)
+      return;
+
+   int direction =
+      CurrentCandleDirection();
+
+   //--------------------------------------------------------------
+   // DOJI / NO CLEAR DIRECTION
+   //--------------------------------------------------------------
+
+   if(direction == 0)
+      return;
+
+   //--------------------------------------------------------------
+   // NO POSITION
+   //--------------------------------------------------------------
+
+   if(CountPositions() == 0)
    {
-      lastClosedBar = t;
+      OpenCurrentDirection(
+         direction
+      );
+
       return;
    }
 
-   if(t == lastClosedBar)
-      return;
+   //--------------------------------------------------------------
+   // CHECK EXISTING POSITIONS
+   //--------------------------------------------------------------
 
-   lastClosedBar = t;
+   string s = Sym();
 
-   if(
-      !AutomaticReEntry &&
-      CountPositions() > 0
+   bool oppositeDetected = false;
+   bool profitableTradeDetected = false;
+
+   for(
+      int i = PositionsTotal() - 1;
+      i >= 0;
+      i--
    )
    {
-      return;
-   }
+      ulong ticket =
+         PositionGetTicket(i);
 
-   if(signal == 1)
-   {
-      StartCycle(
-         true,
-         t
-      );
-   }
-   else if(signal == -1)
-   {
-      StartCycle(
-         false,
-         t
-      );
-   }
-   else
-   {
-      Print(
-         EnumToString(SignalTimeframe),
-         " DOJI - no new cycle."
-      );
-   }
-}
+      if(ticket == 0)
+         continue;
 
-//+------------------------------------------------------------------+
-//| Manage basket                                                     |
-//+------------------------------------------------------------------+
-void ManageBasket()
-{
-   if(CountPositions() <= 0)
-      return;
+      if(!PositionSelectByTicket(ticket))
+         continue;
 
-   double p =
-      BasketProfit();
-
-   if(
-      BasketProfitTarget > 0 &&
-      p >= BasketProfitTarget
-   )
-   {
-      CloseAll(
-         "basket profit target"
-      );
-
-      return;
-   }
-
-   if(
-      BasketLossLimit > 0 &&
-      p <= -MathAbs(BasketLossLimit)
-   )
-   {
-      CloseAll(
-         "basket loss limit"
-      );
-
-      return;
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Initialization                                                   |
-//+------------------------------------------------------------------+
-int OnInit()
-{
-   if(!SymbolSelect(Sym(),true))
-   {
-      Print(
-         "Cannot select ",
-         Sym()
-      );
-
-      return INIT_FAILED;
-   }
-
-   trade.SetExpertMagicNumber(
-      MagicNumber
-   );
-
-   trade.SetDeviationInPoints(
-      SlippagePoints
-   );
-
-   UpdateDay();
-
-   Print(
-      "=========================================="
-   );
-
-   Print(
-      "CRT_AI_BOT v5.00"
-   );
-
-   Print(
-      "Broker/company: ",
-      AccountInfoString(
-         ACCOUNT_COMPANY
+      if(
+         PositionGetString(
+            POSITION_SYMBOL
+         ) != s
       )
-   );
+      {
+         continue;
+      }
 
-   Print(
-      "MT5 server: ",
-      AccountInfoString(
-         ACCOUNT_SERVER
+      if(
+         (ulong)PositionGetInteger(
+            POSITION_MAGIC
+         ) != MagicNumber
       )
-   );
+      {
+         continue;
+      }
 
-   Print(
-      "Account: ",
-      AccountInfoInteger(
-         ACCOUNT_LOGIN
+      //-----------------------------------------------------------
+      // POSITION DIRECTION
+      //-----------------------------------------------------------
+
+      long positionType =
+         PositionGetInteger(
+            POSITION_TYPE
+         );
+
+      bool positionBuy =
+         positionType ==
+         POSITION_TYPE_BUY;
+
+      //-----------------------------------------------------------
+      // POSITION PROFIT
+      //-----------------------------------------------------------
+
+      double profit =
+         PositionGetDouble(
+            POSITION_PROFIT
+         );
+
+      profit +=
+         PositionGetDouble(
+            POSITION_SWAP
+         );
+
+      //-----------------------------------------------------------
+      // CHECK PROFIT
+      //-----------------------------------------------------------
+
+      if(
+         profit >=
+         MinimumProfitToProtect
       )
-   );
+      {
+         profitableTradeDetected = true;
 
-   if(
-      AccountInfoInteger(
-         ACCOUNT_TRADE_MODE
-      ) == ACCOUNT_TRADE_MODE_REAL
-   )
-   {
-      Print(
-         "Account type: REAL"
-      );
-   }
-   else
-   {
-      Print(
-         "Account type: DEMO"
-      );
-   }
+         //--------------------------------------------------------
+         // CURRENT CANDLE OPPOSITE?
+         //--------------------------------------------------------
 
-   Print(
-      "Symbol: ",
-      Sym()
-   );
-
-   Print(
-      "Selected timeframe: ",
-      EnumToString(
-         SignalTimeframe
-      )
-   );
-
-   Print(
-      "=========================================="
-   );
-
-   if(
-      AccountInfoInteger(
-         ACCOUNT_MARGIN_MODE
-      ) ==
-      ACCOUNT_MARGIN_MODE_RETAIL_NETTING
-   )
-   {
-      Print(
-         "WARNING: NETTING account. ",
-         "Separate independent positions ",
-         "are not supported."
-      );
-   }
-   else
-   {
-      Print(
-         "HEDGING-style account detected."
-      );
-   }
-
-   return INIT_SUCCEEDED;
-}
-
-//+------------------------------------------------------------------+
-//| Main tick                                                        |
-//+------------------------------------------------------------------+
-void OnTick()
-{
-   UpdateDay();
-
-   ManageBasket();
-
-   CheckNewBar();
-}
-
-//+------------------------------------------------------------------+
-//| Trade transaction                                                |
-//+------------------------------------------------------------------+
-void OnTradeTransaction(
-   const MqlTradeTransaction &trans,
-   const MqlTradeRequest &request,
-   const MqlTradeResult &result
-)
-{
-   if(
-      trans.type !=
-      TRADE_TRANSACTION_DEAL_ADD
-   )
-   {
-      return;
-   }
-
-   if(trans.deal == 0)
-      return;
-
-   if(!HistoryDealSelect(trans.deal))
-      return;
-
-   long entry =
-      HistoryDealGetInteger(
-         trans.deal,
-         DEAL_ENTRY
-      );
-
-   if(
-      entry != DEAL_ENTRY_OUT &&
-      entry != DEAL_ENTRY_OUT_BY
-   )
-   {
-      return;
-   }
-
-   long magic =
-      HistoryDealGetInteger(
-         trans.deal,
-         DEAL_MAGIC
-      );
-
-   string symbol =
-      HistoryDealGetString(
-         trans.deal,
-         DEAL_SYMBOL
-      );
-
-   if(
-      (ulong)magic != MagicNumber ||
-      symbol != Sym()
-   )
-   {
-      return;
-   }
-
-   double p =
-      HistoryDealGetDouble(
-         trans.deal,
-         DEAL_PROFIT
-      )
-      +
-      HistoryDealGetDouble(
-         trans.deal,
-         DEAL_SWAP
-      )
-      +
-      HistoryDealGetDouble(
-         trans.deal,
-         DEAL_COMMISSION
-      );
-
-   if(p < 0)
-      consecutiveLosses++;
-   else if(p > 0)
-      consecutiveLosses = 0;
-}
-
-//+------------------------------------------------------------------+
-   
+         if(
+  
