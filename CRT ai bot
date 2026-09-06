@@ -1066,5 +1066,432 @@ void ManageFlipping()
          // CURRENT CANDLE OPPOSITE?
          //--------------------------------------------------------
 
+         if(            positionBuy &&
+            direction == -1
+         )
+         {
+            oppositeDetected = true;
+         }
+
          if(
+            !positionBuy &&
+            direction == 1
+         )
+         {
+            oppositeDetected = true;
+         }
+      }
+   }
+
+   //==============================================================
+   // FLIP WHEN PROFITABLE REVERSAL IS DETECTED
+   //==============================================================
+
+   if(
+      profitableTradeDetected &&
+      oppositeDetected
+   )
+   {
+      Print(
+         "PROFITABLE M1 REVERSAL DETECTED"
+      );
+
+      bool closed =
+         CloseAll(
+            "PROFITABLE M1 REVERSAL"
+         );
+
+      if(closed)
+      {
+         if(CountPositions() == 0)
+         {
+            OpenCurrentDirection(
+               direction
+            );
+         }
+      }
+   }
+}
+
+//==================================================================
+// CREATE START / STOP BUTTON
+//==================================================================
+
+void CreateButton(
+   string name,
+   string text,
+   int x,
+   int y
+)
+{
+   if(ObjectFind(0,name) >= 0)
+      ObjectDelete(0,name);
+
+   ObjectCreate(
+      0,
+      name,
+      OBJ_BUTTON,
+      0,
+      0,
+      0
+   );
+
+   ObjectSetInteger(
+      0,
+      name,
+      OBJPROP_CORNER,
+      CORNER_LEFT_UPPER
+   );
+
+   ObjectSetInteger(
+      0,
+      name,
+      OBJPROP_XDISTANCE,
+      x
+   );
+
+   ObjectSetInteger(
+      0,
+      name,
+      OBJPROP_YDISTANCE,
+      y
+   );
+
+   ObjectSetInteger(
+      0,
+      name,
+      OBJPROP_XSIZE,
+      80
+   );
+
+   ObjectSetInteger(
+      0,
+      name,
+      OBJPROP_YSIZE,
+      30
+   );
+
+   ObjectSetString(
+      0,
+      name,
+      OBJPROP_TEXT,
+      text
+   );
+
+   ObjectSetInteger(
+      0,
+      name,
+      OBJPROP_FONTSIZE,
+      10
+   );
+}
+
+//==================================================================
+// INITIALIZATION
+//==================================================================
+
+int OnInit()
+{
+   if(!SymbolSelect(Sym(),true))
+   {
+      Print(
+         "Cannot select symbol ",
+         Sym()
+      );
+
+      return INIT_FAILED;
+   }
+
+   trade.SetExpertMagicNumber(
+      MagicNumber
+   );
+
+   trade.SetDeviationInPoints(
+      SlippagePoints
+   );
+
+   UpdateDay();
+
+   CreateButton(
+      START_BUTTON,
+      "START",
+      10,
+      20
+   );
+
+   CreateButton(
+      STOP_BUTTON,
+      "STOP",
+      100,
+      20
+   );
+
+   Print(
+      "=========================================="
+   );
+
+   Print(
+      "CRT AI BOT v6.00"
+   );
+
+   Print(
+      "M1 REAL-TIME FLIPPING ROBOT"
+   );
+
+   Print(
+      "Symbol: ",
+      Sym()
+   );
+
+   Print(
+      "Dynamic lot multiplier: ",
+      DoubleToString(
+         LotMultiplier,
+         4
+      )
+   );
+
+   Print(
+      "Maximum spread filter: DISABLED"
+   );
+
+   Print(
+      "=========================================="
+   );
+
+   return INIT_SUCCEEDED;
+}
+
+//==================================================================
+// DEINITIALIZATION
+//==================================================================
+
+void OnDeinit(
+   const int reason
+)
+{
+   ObjectDelete(
+      0,
+      START_BUTTON
+   );
+
+   ObjectDelete(
+      0,
+      STOP_BUTTON
+   );
+}
+
+//==================================================================
+// MAIN TICK
+//==================================================================
+
+void OnTick()
+{
+   UpdateDay();
+
+   if(!tradingEnabled)
+      return;
+
+   if(tradingLocked)
+      return;
+
+   if(!RiskOK())
+      return;
+
+   ManageFlipping();
+}
+
+//==================================================================
+// START / STOP BUTTON EVENTS
+//==================================================================
+
+void OnChartEvent(
+   const int id,
+   const long &lparam,
+   const double &dparam,
+   const string &sparam
+)
+{
+   if(
+      id != CHARTEVENT_OBJECT_CLICK
+   )
+   {
+      return;
+   }
+
+   //--------------------------------------------------------------
+   // START
+   //--------------------------------------------------------------
+
+   if(
+      sparam ==
+      START_BUTTON
+   )
+   {
+      if(tradingLocked)
+      {
+         Print(
+            "START blocked: risk protection is active."
+         );
+
+         return;
+      }
+
+      tradingEnabled = true;
+
+      Print(
+         "CRT AI BOT STARTED"
+      );
+
+      int direction =
+         CurrentCandleDirection();
+
+      if(
+         direction != 0 &&
+         CountPositions() == 0
+      )
+      {
+         OpenCurrentDirection(
+            direction
+         );
+      }
+   }
+
+   //--------------------------------------------------------------
+   // STOP
+   //--------------------------------------------------------------
+
+   if(
+      sparam ==
+      STOP_BUTTON
+   )
+   {
+      tradingEnabled = false;
+
+      CloseAll(
+         "MANUAL STOP"
+      );
+
+      Print(
+         "CRT AI BOT STOPPED"
+      );
+   }
+}
+
+//==================================================================
+// TRADE TRANSACTION
+//==================================================================
+
+void OnTradeTransaction(
+   const MqlTradeTransaction &trans,
+   const MqlTradeRequest &request,
+   const MqlTradeResult &result
+)
+{
+   if(
+      trans.type !=
+      TRADE_TRANSACTION_DEAL_ADD
+   )
+   {
+      return;
+   }
+
+   if(trans.deal == 0)
+      return;
+
+   if(
+      !HistoryDealSelect(
+         trans.deal
+      )
+   )
+   {
+      return;
+   }
+
+   long entry =
+      HistoryDealGetInteger(
+         trans.deal,
+         DEAL_ENTRY
+      );
+
+   if(
+      entry != DEAL_ENTRY_OUT &&
+      entry != DEAL_ENTRY_OUT_BY
+   )
+   {
+      return;
+   }
+
+   long magic =
+      HistoryDealGetInteger(
+         trans.deal,
+         DEAL_MAGIC
+      );
+
+   string symbol =
+      HistoryDealGetString(
+         trans.deal,
+         DEAL_SYMBOL
+      );
+
+   if(
+      (ulong)magic != MagicNumber ||
+      symbol != Sym()
+   )
+   {
+      return;
+   }
+
+   double profit =
+      HistoryDealGetDouble(
+         trans.deal,
+         DEAL_PROFIT
+      );
+
+   double swap =
+      HistoryDealGetDouble(
+         trans.deal,
+         DEAL_SWAP
+      );
+
+   double commission =
+      HistoryDealGetDouble(
+         trans.deal,
+         DEAL_COMMISSION
+      );
+
+   double netProfit =
+      profit +
+      swap +
+      commission;
+
+   if(netProfit < 0)
+   {
+      consecutiveLosses++;
+   }
+   else if(netProfit > 0)
+   {
+      consecutiveLosses = 0;
+   }
+
+   if(
+      MaximumConsecutiveLosses > 0 &&
+      consecutiveLosses >=
+      MaximumConsecutiveLosses
+   )
+   {
+      tradingLocked = true;
+      tradingEnabled = false;
+
+      CloseAll(
+         "MAXIMUM CONSECUTIVE LOSSES"
+      );
+
+      Print(
+         "CRT AI BOT LOCKED BY RISK PROTECTION"
+      );
+   }
+}
+
+//+------------------------------------------------------------------+
   
