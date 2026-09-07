@@ -1,9 +1,10 @@
 //+------------------------------------------------------------------+
 //| CRT AI BOT - M1 FLIPPING ROBOT                                  |
 //| Current candle direction - real-time flipping                   |
+//| Multiple positions + automatic 50% balance margin allocation    |
 //+------------------------------------------------------------------+
 #property strict
-#property version "6.00"
+#property version "7.00"
 
 #include <Trade/Trade.mqh>
 
@@ -28,10 +29,16 @@ input string TradingSymbol = "";     // Blank = chart symbol
 input double LotMultiplier = 0.001;
 
 // Number of trades opened when a new direction is created.
-input int OrdersPerSignal = 1;
+// 0 = automatically calculate from 50% balance margin allowance.
+input int OrdersPerSignal = 0;
 
-// Maximum number of EA positions on this symbol.
-input int MaximumOpenPositions = 1;
+// Maximum number of EA positions.
+// 0 = automatically calculate from 50% balance margin allowance.
+input int MaximumOpenPositions = 0;
+
+// Percentage of account balance that may be used as margin
+// for the EA's simultaneous positions.
+input double MaximumBalanceMarginPercent = 50.0;
 
 // Maximum total lots for this EA.
 // 0 = disabled.
@@ -46,9 +53,7 @@ input double MaximumEAExposureLots = 10.0;
 //
 // Example:
 // 0.01 = one cent of account currency.
-//
-// This prevents the EA from treating an almost-zero floating
-// value as meaningful profit.
+
 input double MinimumProfitToProtect = 0.01;
 
 //==================================================================
@@ -637,6 +642,197 @@ int CurrentCandleDirection()
 }
 
 //==================================================================
+// CALCULATE AUTOMATIC POSITION CAP
+//==================================================================
+
+// Calculates how many lots/positions can be opened while using
+// no more than MaximumBalanceMarginPercent of account balance
+// as estimated margin.
+//
+// The calculation uses the broker's actual OrderCalcMargin()
+// function for the current symbol and direction.
+
+int CalculateAutomaticPositionLimit(
+   bool buy,
+   double volume
+)
+{
+   if(volume <= 0)
+      return 0;
+
+   string s = Sym();
+
+   double balance =
+      AccountInfoDouble(
+         ACCOUNT_BALANCE
+      );
+
+   if(balance <= 0)
+      return 0;
+
+   double allowedMargin =
+      balance *
+      MaximumBalanceMarginPercent /
+      100.0;
+
+   if(allowedMargin <= 0)
+      return 0;
+
+   double price;
+
+   if(buy)
+   {
+      price =
+         SymbolInfoDouble(
+            s,
+            SYMBOL_ASK
+         );
+   }
+   else
+   {
+      price =
+         SymbolInfoDouble(
+            s,
+            SYMBOL_BID
+         );
+   }
+
+   if(price <= 0)
+      return 0;
+
+   double marginOneTrade = 0;
+
+   ENUM_ORDER_TYPE orderType;
+
+   if(buy)
+      orderType = ORDER_TYPE_BUY;
+   else
+      orderType = ORDER_TYPE_SELL;
+
+   if(
+      !OrderCalcMargin(
+         orderType,
+         s,
+         volume,
+         price,
+         marginOneTrade
+      )
+   )
+   {
+      Print(
+         "OrderCalcMargin failed. Error = ",
+         GetLastError()
+      );
+
+      return 0;
+   }
+
+   if(marginOneTrade <= 0)
+      return 0;
+
+   //--------------------------------------------------------------
+   // Account margin already being used by this EA is included
+   // through the remaining balance available for this allocation.
+   //--------------------------------------------------------------
+
+   double existingMargin = 0;
+
+   for(
+      int i = PositionsTotal() - 1;
+      i >= 0;
+      i--
+   )
+   {
+      ulong ticket =
+         PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      if(
+         PositionGetString(
+            POSITION_SYMBOL
+         ) != s
+      )
+      {
+         continue;
+      }
+
+      if(
+         (ulong)PositionGetInteger(
+            POSITION_MAGIC
+         ) != MagicNumber
+      )
+      {
+         continue;
+      }
+
+      existingMargin +=
+         PositionGetDouble(
+            POSITION_MARGIN
+         );
+   }
+
+   //--------------------------------------------------------------
+   // Some MT5 environments may not provide POSITION_MARGIN.
+   // If unavailable/zero, estimate existing margin from volume.
+   //--------------------------------------------------------------
+
+   if(existingMargin < 0)
+      existingMargin = 0;
+
+   double remainingMargin =
+      allowedMargin -
+      existingMargin;
+
+   if(remainingMargin <= 0)
+      return 0;
+
+   int possible =
+      (int)MathFloor(
+         remainingMargin /
+         marginOneTrade
+      );
+
+   //--------------------------------------------------------------
+   // Apply the EA's maximum lot exposure.
+   //--------------------------------------------------------------
+
+   if(MaximumEAExposureLots > 0)
+   {
+      double existingLots =
+         TotalLots();
+
+      double remainingLots =
+         MaximumEAExposureLots -
+         existingLots;
+
+      if(remainingLots <= 0)
+         return 0;
+
+      int byLots =
+         (int)MathFloor(
+            remainingLots /
+            volume
+         );
+
+      possible =
+         MathMin(
+            possible,
+            byLots
+         );
+   }
+
+   return MathMax(
+      possible,
+      0
+   );
+}
+
+//==================================================================
 // OPEN ONE TRADE
 //==================================================================
 
@@ -811,10 +1007,7 @@ bool OpenOne(
       )
    );
 
-   return true;
-}
-
-//==================================================================
+   return true;//==================================================================
 // OPEN CURRENT DIRECTION
 //==================================================================
 
@@ -844,21 +1037,6 @@ void OpenCurrentDirection(
    }
 
    //--------------------------------------------------------------
-   // CHECK POSITION LIMIT
-   //--------------------------------------------------------------
-
-   int currentPositions =
-      CountPositions();
-
-   if(
-      currentPositions >=
-      MaximumOpenPositions
-   )
-   {
-      return;
-   }
-
-   //--------------------------------------------------------------
    // CALCULATE DYNAMIC LOT
    //--------------------------------------------------------------
 
@@ -875,47 +1053,101 @@ void OpenCurrentDirection(
    }
 
    //--------------------------------------------------------------
-   // EXPOSURE LIMIT
-   //--------------------------------------------------------------
-
-   if(
-      MaximumEAExposureLots > 0
-   )
-   {
-      if(
-         TotalLots() +
-         volume >
-         MaximumEAExposureLots +
-         1e-9
-      )
-      {
-         Print(
-            "EA exposure limit reached."
-         );
-
-         return;
-      }
-   }
-
-   //--------------------------------------------------------------
-   // OPEN
+   // BUY / SELL
    //--------------------------------------------------------------
 
    bool buy =
       direction == 1;
 
+   //--------------------------------------------------------------
+   // AUTOMATIC POSITION CALCULATION
+   //--------------------------------------------------------------
+
+   int automaticPositions =
+      CalculateAutomaticPositionLimit(
+         buy,
+         volume
+      );
+
+   if(automaticPositions <= 0)
+   {
+      Print(
+         "No position available within the 50% balance margin limit."
+      );
+
+      return;
+   }
+
+   //--------------------------------------------------------------
+   // EXISTING POSITIONS
+   //--------------------------------------------------------------
+
+   int currentPositions =
+      CountPositions();
+
+   //--------------------------------------------------------------
+   // MAXIMUM OPEN POSITION LIMIT
+   //
+   // If MaximumOpenPositions = 0,
+   // use the automatically calculated limit.
+   //--------------------------------------------------------------
+
+   int maximumPositions =
+      automaticPositions;
+
+   if(MaximumOpenPositions > 0)
+   {
+      maximumPositions =
+         MathMin(
+            MaximumOpenPositions,
+            automaticPositions
+         );
+   }
+
+   if(
+      currentPositions >=
+      maximumPositions
+   )
+   {
+      return;
+   }
+
+   //--------------------------------------------------------------
+   // AVAILABLE SLOTS
+   //--------------------------------------------------------------
+
    int availableSlots =
-      MaximumOpenPositions -
+      maximumPositions -
       currentPositions;
 
-   int orders =
-      MathMin(
-         OrdersPerSignal,
-         availableSlots
-      );
+   //--------------------------------------------------------------
+   // ORDERS PER SIGNAL
+   //
+   // If OrdersPerSignal = 0,
+   // fill all available automatic slots.
+   //--------------------------------------------------------------
+
+   int orders;
+
+   if(OrdersPerSignal <= 0)
+   {
+      orders = availableSlots;
+   }
+   else
+   {
+      orders =
+         MathMin(
+            OrdersPerSignal,
+            availableSlots
+         );
+   }
 
    if(orders <= 0)
       return;
+
+   //--------------------------------------------------------------
+   // OPEN MULTIPLE POSITIONS
+   //--------------------------------------------------------------
 
    for(
       int i = 0;
@@ -929,6 +1161,29 @@ void OpenCurrentDirection(
       if(!RiskOK())
          break;
 
+      //-----------------------------------------------------------
+      // Recalculate automatic capacity before every order.
+      //-----------------------------------------------------------
+
+      int remainingCapacity =
+         CalculateAutomaticPositionLimit(
+            buy,
+            volume
+         );
+
+      if(remainingCapacity <= 0)
+      {
+         Print(
+            "50% balance margin allocation reached."
+         );
+
+         break;
+      }
+
+      //-----------------------------------------------------------
+      // Maximum EA exposure
+      //-----------------------------------------------------------
+
       if(
          MaximumEAExposureLots > 0 &&
          TotalLots() +
@@ -937,8 +1192,16 @@ void OpenCurrentDirection(
          1e-9
       )
       {
+         Print(
+            "EA exposure limit reached."
+         );
+
          break;
       }
+
+      //-----------------------------------------------------------
+      // Open trade
+      //-----------------------------------------------------------
 
       OpenOne(
          buy,
@@ -1066,7 +1329,8 @@ void ManageFlipping()
          // CURRENT CANDLE OPPOSITE?
          //--------------------------------------------------------
 
-         if(            positionBuy &&
+         if(
+            positionBuy &&
             direction == -1
          )
          {
@@ -1083,9 +1347,9 @@ void ManageFlipping()
       }
    }
 
-   //==============================================================
+   //--------------------------------------------------------------
    // FLIP WHEN PROFITABLE REVERSAL IS DETECTED
-   //==============================================================
+   //--------------------------------------------------------------
 
    if(
       profitableTradeDetected &&
@@ -1103,13 +1367,62 @@ void ManageFlipping()
 
       if(closed)
       {
-         if(CountPositions() == 0)
+         //---------------------------------------------------------
+         // IMMEDIATE RE-ENTRY
+         //
+         // No waiting for candle close.
+         // The CURRENT forming M1 candle direction is used.
+         //---------------------------------------------------------
+
+         if(
+            CountPositions() == 0 &&
+            tradingEnabled &&
+            RiskOK()
+         )
          {
-            OpenCurrentDirection(
-               direction
-            );
+            int currentDirection =
+               CurrentCandleDirection();
+
+            if(currentDirection != 0)
+            {
+               OpenCurrentDirection(
+                  currentDirection
+               );
+            }
          }
       }
+   }
+}
+
+//==================================================================
+// UPDATE STATUS
+//==================================================================
+
+void UpdateStatus()
+{
+   string status;
+
+   if(tradingLocked)
+   {
+      status = "LOCKED";
+   }
+   else if(tradingEnabled)
+   {
+      status = "RUNNING";
+   }
+   else
+   {
+      status = "STOPPED";
+   }
+
+   if(ObjectFind(0,STATUS_LABEL) >= 0)
+   {
+      ObjectSetString(
+         0,
+         STATUS_LABEL,
+         OBJPROP_TEXT,
+         "CRT AI BOT: " + status
+      );
    }
 }
 
@@ -1231,7 +1544,7 @@ int OnInit()
    );
 
    Print(
-      "CRT AI BOT v6.00"
+      "CRT AI BOT v7.00"
    );
 
    Print(
@@ -1249,6 +1562,31 @@ int OnInit()
          LotMultiplier,
          4
       )
+   );
+
+   Print(
+      "Automatic margin allocation: ",
+      DoubleToString(
+         MaximumBalanceMarginPercent,
+         1
+      ),
+      "% of account balance"
+   );
+
+   Print(
+      "Orders per signal: AUTOMATIC"
+   );
+
+   Print(
+      "Maximum positions: AUTOMATIC"
+   );
+
+   Print(
+      "Immediate re-entry: ENABLED"
+   );
+
+   Print(
+      "Candle: CURRENT FORMING M1"
    );
 
    Print(
@@ -1278,6 +1616,11 @@ void OnDeinit(
    ObjectDelete(
       0,
       STOP_BUTTON
+   );
+
+   ObjectDelete(
+      0,
+      STATUS_LABEL
    );
 }
 
@@ -1339,17 +1682,20 @@ void OnChartEvent(
 
       tradingEnabled = true;
 
+      UpdateStatus();
+
       Print(
          "CRT AI BOT STARTED"
       );
 
+      //-----------------------------------------------------------
+      // OPEN IMMEDIATELY USING CURRENT FORMING M1 CANDLE
+      //-----------------------------------------------------------
+
       int direction =
          CurrentCandleDirection();
 
-      if(
-         direction != 0 &&
-         CountPositions() == 0
-      )
+      if(direction != 0)
       {
          OpenCurrentDirection(
             direction
@@ -1367,6 +1713,8 @@ void OnChartEvent(
    )
    {
       tradingEnabled = false;
+
+      UpdateStatus();
 
       CloseAll(
          "MANUAL STOP"
@@ -1474,6 +1822,10 @@ void OnTradeTransaction(
       consecutiveLosses = 0;
    }
 
+   //--------------------------------------------------------------
+   // MAXIMUM CONSECUTIVE LOSSES
+   //--------------------------------------------------------------
+
    if(
       MaximumConsecutiveLosses > 0 &&
       consecutiveLosses >=
@@ -1487,11 +1839,54 @@ void OnTradeTransaction(
          "MAXIMUM CONSECUTIVE LOSSES"
       );
 
+      UpdateStatus();
+
       Print(
          "CRT AI BOT LOCKED BY RISK PROTECTION"
       );
+
+      return;
+   }
+
+   //--------------------------------------------------------------
+   // IMMEDIATE RE-ENTRY
+   //
+   // IMPORTANT:
+   // Only re-enter when ALL EA positions have actually closed.
+   // This prevents one closing deal in a multi-position basket
+   // from creating an unwanted extra trade.
+   //--------------------------------------------------------------
+
+   if(
+      tradingEnabled &&
+      !tradingLocked &&
+      CountPositions() == 0
+   )
+   {
+      if(!RiskOK())
+         return;
+
+      //-----------------------------------------------------------
+      // Use CURRENT FORMING M1 candle.
+      // No candle-close confirmation.
+      //-----------------------------------------------------------
+
+      int direction =
+         CurrentCandleDirection();
+
+      if(direction != 0)
+      {
+         Print(
+            "IMMEDIATE RE-ENTRY: CURRENT M1 DIRECTION = ",
+            direction == 1 ? "BUY" : "SELL"
+         );
+
+         OpenCurrentDirection(
+            direction
+         );
+      }
    }
 }
 
 //+------------------------------------------------------------------+
-  
+}
