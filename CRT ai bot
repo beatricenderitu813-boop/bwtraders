@@ -504,9 +504,7 @@ double CalculateDynamicLot()
    return NormalizeVolume(
       Sym(),
       lot
-   );
-}
-//==================================================================
+   );//==================================================================
 // OPEN ONE TRADE
 //==================================================================
 
@@ -1229,9 +1227,7 @@ void UpdateDay()
             2
          )
       );
-   }
-}
-//==================================================================
+   }//==================================================================
 // RISK CHECK
 //
 // Risk protection stops NEW trading.
@@ -2277,3 +2273,117 @@ void OnTradeTransaction(
    const MqlTradeRequest &request,
    const MqlTradeResult &result
 )
+{
+   // Only process completed deals
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD)
+      return;
+
+   // Make sure the deal exists
+   if(trans.deal == 0)
+      return;
+
+   // Select the deal from history
+   if(!HistoryDealSelect(trans.deal))
+      return;
+
+   // Only process EXIT deals
+   long entryType = HistoryDealGetInteger(
+      trans.deal,
+      DEAL_ENTRY
+   );
+
+   if(entryType != DEAL_ENTRY_OUT &&
+      entryType != DEAL_ENTRY_OUT_BY)
+      return;
+
+   // Check symbol
+   string dealSymbol = HistoryDealGetString(
+      trans.deal,
+      DEAL_SYMBOL
+   );
+
+   if(dealSymbol != _Symbol)
+      return;
+
+   // Check magic number
+   long dealMagic = HistoryDealGetInteger(
+      trans.deal,
+      DEAL_MAGIC
+   );
+
+   if(dealMagic != MagicNumber)
+      return;
+
+   // Calculate the real net result
+   double dealProfit = HistoryDealGetDouble(
+      trans.deal,
+      DEAL_PROFIT
+   );
+
+   double dealSwap = HistoryDealGetDouble(
+      trans.deal,
+      DEAL_SWAP
+   );
+
+   double dealCommission = HistoryDealGetDouble(
+      trans.deal,
+      DEAL_COMMISSION
+   );
+
+   double netProfit =
+      dealProfit +
+      dealSwap +
+      dealCommission;
+
+   // Track consecutive losses
+   if(netProfit < 0.0)
+   {
+      consecutiveLosses++;
+
+      Print(
+         "Loss recorded. Net = ",
+         DoubleToString(netProfit, 2),
+         " | Consecutive losses = ",
+         consecutiveLosses
+      );
+
+      // Lock NEW trades after maximum consecutive losses.
+      // IMPORTANT: Do NOT close the existing basket here.
+      if(MaximumConsecutiveLosses > 0 &&
+         consecutiveLosses >= MaximumConsecutiveLosses)
+      {
+         tradingLocked = true;
+
+         Print(
+            "MAXIMUM CONSECUTIVE LOSSES reached. ",
+            "New trading locked. Existing positions are NOT force-closed."
+         );
+      }
+   }
+   else if(netProfit > 0.0)
+   {
+      consecutiveLosses = 0;
+
+      Print(
+         "Winning deal recorded. Net = ",
+         DoubleToString(netProfit, 2),
+         " | Consecutive losses reset."
+      );
+   }
+
+   // If all EA positions are now confirmed closed,
+   // allow the pending re-entry logic to run on the next tick.
+   if(CountPositions() == 0)
+   {
+      protectionActive = false;
+      peakBasketProfit = 0.0;
+
+      if(reentryPending)
+      {
+         Print(
+            "Basket closure confirmed. ",
+            "Current forming M1 candle will be rescanned."
+         );
+      }
+   }
+}
