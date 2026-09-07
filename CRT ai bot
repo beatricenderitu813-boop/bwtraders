@@ -1,92 +1,99 @@
 //+------------------------------------------------------------------+
-//|                  CRT AI BOT - CURRENT M1 CANDLE FLIPPING        |
-//|                         Version 11.00                            |
-//|                                                                  |
-//| Strategy:                                                        |
-//| - Uses the CURRENT forming M1 candle                             |
-//| - BUY when BUY strength >= 55%                                   |
-//| - SELL when SELL strength >= 55%                                 |
-//| - Multiple trades allowed                                        |
-//| - Uses up to 50% of account balance margin allowance             |
-//| - Reverses losing basket when opposite strength >= 65%           |
-//| - Maximum basket loss = 2% of account balance                     |
-//| - Maximum losing basket time = 5 minutes                          |
-//| - Protects profitable baskets using 2% peak-profit retracement   |
-//| - Automatically re-enters after confirmed basket closure         |
+//| CRT AI BOT v11.00                                                |
+//| CURRENT FORMING M1 + PROFIT RETRACEMENT + CAPITAL PROTECTION    |
 //+------------------------------------------------------------------+
-
 #property strict
-#property version   "11.00"
-#property description "CRT AI BOT - Current M1 Candle Flipping with Capital Protection"
-
-//==================================================================
-// TRADE LIBRARY
-//==================================================================
+#property version "11.00"
 
 #include <Trade/Trade.mqh>
 
 CTrade trade;
 
 //==================================================================
-// INPUT SETTINGS
+// INPUTS
 //==================================================================
 
-//-------------------------
-// SIGNAL SETTINGS
-//-------------------------
+input string TradingSymbol = "";
 
-input ENUM_TIMEFRAMES SignalTimeframe = PERIOD_M1;
+//==================================================================
+// SIGNAL
+//==================================================================
 
-input double BuySignalPercent  = 55.0;
-input double SellSignalPercent = 55.0;
+// Either BUY or SELL must reach this level.
+input double MinimumSignalStrength = 55.0;
 
-input double ReversalSignalPercent = 65.0;
+// Current forming M1 candle only.
+input int ScanCandles = 1;
 
-//-------------------------
-// TRADE SETTINGS
-//-------------------------
+//==================================================================
+// LOT / MARGIN
+//==================================================================
 
-input bool UseAutoLot = false;
-
-input double ManualLotSize = 0.01;
-
-input double RiskPercent = 0.50;
-
+// Example:
+// $10   -> 0.01 lot
+// $100  -> 0.10 lot
+// $1000 -> 1.00 lot
 input double LotMultiplier = 0.001;
 
-input double MaximumLotSize = 1.00;
-
+// 0 = automatically use available positions
+// within the exposure and margin limits.
 input int OrdersPerSignal = 0;
 
+// 0 = no separate position-count limit.
 input int MaximumOpenPositions = 0;
 
-input double MaximumEAExposureLots = 10.0;
-
-//-------------------------
-// MARGIN SETTINGS
-//-------------------------
-
+// Maximum estimated margin used by this EA.
 input double MaximumBalanceMarginPercent = 50.0;
 
-//-------------------------
+// Maximum total lots for this EA.
+input double MaximumEAExposureLots = 10.0;
+
+//==================================================================
 // PROFIT PROTECTION
-//-------------------------
+//==================================================================
 
-input double ProfitRetracePercent = 2.0;
-
+// Protection starts once basket profit reaches this amount.
 input double MinimumProfitToProtect = 0.01;
 
-//-------------------------
+// Close basket when profit falls by 2% from its highest profit.
+input double ProfitRetracementPercent = 2.0;
+
+//==================================================================
 // CAPITAL PROTECTION
-//-------------------------
+//==================================================================
 
-input double MaximumBasketLossPercent = 2.0;
+// When basket loss reaches this percentage of starting-day equity,
+// the bot opens the OPPOSITE direction to protect the capital.
+//
+// Example:
+// Day equity = $100
+// CapitalProtectionPercent = 1.0
+// Protection activates around -$1.00.
+input double CapitalProtectionPercent = 1.0;
 
-input int MaximumLosingBasketMinutes = 5;
+// Maximum number of protection flips for one basket.
+// 1 means the bot can hedge/flip only once.
+input int MaximumProtectionFlips = 1;
 
-//-------------------------
+//==================================================================
+// EXECUTION
+//==================================================================
+
+input int SlippagePoints = 20;
+
+// 0 = disabled.
+input double StopLossPips = 0.0;
+
+// 0 = disabled.
+input double TakeProfitPips = 0.0;
+
+// Maximum spread allowed.
+// 0 = disabled.
+input double MaximumSpreadPips = 5.0;
+
+//==================================================================
 // RISK PROTECTION
-//-------------------------
+//==================================================================
 
 input double DailyLossLimitPercent = 2.0;
 
@@ -94,111 +101,171 @@ input double MaximumDrawdownPercent = 5.0;
 
 input int MaximumConsecutiveLosses = 3;
 
-//-------------------------
-// EXECUTION SETTINGS
-//-------------------------
+//==================================================================
+// MAGIC NUMBER
+//==================================================================
 
-input double MaximumSpreadPips = 5.0;
-
-input int SlippagePoints = 20;
-
-// Emergency stop loss in pips.
-// 0 = disabled.
-input double EmergencyStopLossPips = 0.0;
-
-// Take profit in pips.
-// 0 = disabled.
-input double TakeProfitPips = 0.0;
-
-//-------------------------
-// EA IDENTIFICATION
-//-------------------------
-
-input long MagicNumber = 26082026;
+input ulong MagicNumber = 26092026;
 
 //==================================================================
 // GLOBAL VARIABLES
 //==================================================================
 
-// Trading control
 bool tradingEnabled = false;
-bool tradingLocked  = false;
 
-// Re-entry control
-bool reentryPending = false;
+bool tradingLocked = false;
 
-// Basket protection
 bool protectionActive = false;
 
-double peakBasketProfit = 0.0;
-
-// Basket losing-time tracking
-datetime basketStartTime = 0;
-
-// Prevent repeated basket closing requests
 bool closingBasket = false;
 
-// Consecutive losses
-int consecutiveLosses = 0;
+bool reentryPending = false;
 
-// Daily tracking
-datetime savedDay = 0;
+bool capitalProtectionTriggered = false;
 
 double dayStartEquity = 0.0;
 
+double peakBasketProfit = 0.0;
+
+double buyStrength = 0.0;
+
+double sellStrength = 0.0;
+
+int savedDay = -1;
+
+int consecutiveLosses = 0;
+
+int protectionFlips = 0;
+
+datetime lastProcessedCandle = 0;
+
+string signalText = "WAIT";
+
+string START_BUTTON = "CRT_START_BUTTON";
+
+string STOP_BUTTON = "CRT_STOP_BUTTON";
+
+string STATUS_LABEL = "CRT_STATUS_LABEL";
+
 //==================================================================
-// BASIC SYMBOL FUNCTION
+// FUNCTION DECLARATIONS
+//==================================================================
+
+string Sym();
+
+double PipSize(string symbol);
+
+double NormalizeVolume(
+   string symbol,
+   double volume
+);
+
+double CalculateDynamicLot();
+
+int CountPositions();
+
+double TotalLots();
+
+double BasketProfit();
+
+bool SpreadOK();
+
+bool CloseAll(string reason);
+
+void UpdateDay();
+
+bool RiskOK();
+
+int CurrentCandleDirection();
+
+double CalculateBuyStrength();
+
+double CalculateSellStrength();
+
+void ScanCurrentCandle();
+
+int GetSignalDirection();
+
+int CalculateAutomaticPositionLimit(
+   bool buy,
+   double volume
+);
+
+bool OpenOne(
+   bool buy,
+   double volume,
+   string comment
+);
+
+void OpenCurrentDirection(
+   int direction
+);
+
+void ManageProfitProtection();
+
+void ManageCapitalProtection();
+
+bool IsNewM1Candle();
+
+void ManageFlipping();
+
+void CreateButton(
+   string name,
+   string text,
+   int x,
+   int y
+);
+
+void UpdateStatus();
+
+//==================================================================
+// SYMBOL
 //==================================================================
 
 string Sym()
 {
-   return _Symbol;
+   if(TradingSymbol == "")
+      return _Symbol;
+
+   return TradingSymbol;
 }
 
 //==================================================================
-// POINT / PIP FUNCTION
+// PIP SIZE
 //==================================================================
 
-double PipSize(string symbol)
+double PipSize(
+   string symbol
+)
 {
-   double point = SymbolInfoDouble(
-      symbol,
-      SYMBOL_POINT
-   );
+   double point =
+      SymbolInfoDouble(
+         symbol,
+         SYMBOL_POINT
+      );
 
-   int digits = (int)SymbolInfoInteger(
-      symbol,
-      SYMBOL_DIGITS
-   );
+   int digits =
+      (int)SymbolInfoInteger(
+         symbol,
+         SYMBOL_DIGITS
+      );
 
-   if(digits == 3 || digits == 5)
+   if(point <= 0.0)
+      return 0.0;
+
+   if(
+      digits == 3 ||
+      digits == 5
+   )
+   {
       return point * 10.0;
+   }
 
    return point;
 }
 
 //==================================================================
-// NORMALIZE PRICE
-//==================================================================
-
-double NormalizePrice(
-   string symbol,
-   double price
-)
-{
-   int digits = (int)SymbolInfoInteger(
-      symbol,
-      SYMBOL_DIGITS
-   );
-
-   return NormalizeDouble(
-      price,
-      digits
-   );
-}
-
-//==================================================================
-// NORMALIZE LOT
+// NORMALIZE VOLUME
 //==================================================================
 
 double NormalizeVolume(
@@ -206,20 +273,31 @@ double NormalizeVolume(
    double volume
 )
 {
-   double minLot = SymbolInfoDouble(
-      symbol,
-      SYMBOL_VOLUME_MIN
-   );
+   double minLot =
+      SymbolInfoDouble(
+         symbol,
+         SYMBOL_VOLUME_MIN
+      );
 
-   double maxLot = SymbolInfoDouble(
-      symbol,
-      SYMBOL_VOLUME_MAX
-   );
+   double maxLot =
+      SymbolInfoDouble(
+         symbol,
+         SYMBOL_VOLUME_MAX
+      );
 
-   double step = SymbolInfoDouble(
-      symbol,
-      SYMBOL_VOLUME_STEP
-   );
+   double step =
+      SymbolInfoDouble(
+         symbol,
+         SYMBOL_VOLUME_STEP
+      );
+
+   if(
+      minLot <= 0.0 ||
+      maxLot <= 0.0
+   )
+   {
+      return 0.0;
+   }
 
    if(step <= 0.0)
       step = minLot;
@@ -230,9 +308,6 @@ double NormalizeVolume(
    if(volume > maxLot)
       volume = maxLot;
 
-   if(volume > MaximumLotSize)
-      volume = MaximumLotSize;
-
    volume =
       MathFloor(
          volume / step
@@ -241,446 +316,22 @@ double NormalizeVolume(
    if(volume < minLot)
       volume = minLot;
 
+   int digits = 2;
+
+   if(step < 0.01)
+      digits = 3;
+
+   if(step < 0.001)
+      digits = 4;
+
    return NormalizeDouble(
       volume,
-      8
+      digits
    );
 }
 
 //==================================================================
-// COUNT EA POSITIONS
-//==================================================================
-
-int CountPositions()
-{
-   int count = 0;
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket =
-         PositionGetTicket(i);
-
-      if(ticket == 0)
-         continue;
-
-      if(!PositionSelectByTicket(ticket))
-         continue;
-
-      string symbol =
-         PositionGetString(
-            POSITION_SYMBOL
-         );
-
-      long magic =
-         PositionGetInteger(
-            POSITION_MAGIC
-         );
-
-      if(symbol != Sym())
-         continue;
-
-      if(magic != MagicNumber)
-         continue;
-
-      count++;
-   }
-
-   return count;
-}
-
-//==================================================================
-// TOTAL EA LOTS
-//==================================================================
-
-double TotalEALots()
-{
-   double totalLots = 0.0;
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket =
-         PositionGetTicket(i);
-
-      if(ticket == 0)
-         continue;
-
-      if(!PositionSelectByTicket(ticket))
-         continue;
-
-      string symbol =
-         PositionGetString(
-            POSITION_SYMBOL
-         );
-
-      long magic =
-         PositionGetInteger(
-            POSITION_MAGIC
-         );
-
-      if(symbol != Sym())
-         continue;
-
-      if(magic != MagicNumber)
-         continue;
-
-      totalLots +=
-         PositionGetDouble(
-            POSITION_VOLUME
-         );
-   }
-
-   return totalLots;
-}
-
-//==================================================================
-// BASKET PROFIT
-//==================================================================
-
-double BasketProfit()
-{
-   double totalProfit = 0.0;
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket =
-         PositionGetTicket(i);
-
-      if(ticket == 0)
-         continue;
-
-      if(!PositionSelectByTicket(ticket))
-         continue;
-
-      string symbol =
-         PositionGetString(
-            POSITION_SYMBOL
-         );
-
-      long magic =
-         PositionGetInteger(
-            POSITION_MAGIC
-         );
-
-      if(symbol != Sym())
-         continue;
-
-      if(magic != MagicNumber)
-         continue;
-
-      totalProfit +=
-         PositionGetDouble(
-            POSITION_PROFIT
-         );
-
-      totalProfit +=
-         PositionGetDouble(
-            POSITION_SWAP
-         );
-   }
-
-   return totalProfit;
-}
-
-//==================================================================
-// BASKET DIRECTION
-//
-// Returns:
-//  1 = BUY basket
-// -1 = SELL basket
-//  0 = no basket / mixed
-//==================================================================
-
-int BasketDirection()
-{
-   int direction = 0;
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket =
-         PositionGetTicket(i);
-
-      if(ticket == 0)
-         continue;
-
-      if(!PositionSelectByTicket(ticket))
-         continue;
-
-      string symbol =
-         PositionGetString(
-            POSITION_SYMBOL
-         );
-
-      long magic =
-         PositionGetInteger(
-            POSITION_MAGIC
-         );
-
-      if(symbol != Sym())
-         continue;
-
-      if(magic != MagicNumber)
-         continue;
-
-      ENUM_POSITION_TYPE type =
-         (ENUM_POSITION_TYPE)
-         PositionGetInteger(
-            POSITION_TYPE
-         );
-
-      if(type == POSITION_TYPE_BUY)
-      {
-         if(direction == 0)
-            direction = 1;
-         else if(direction != 1)
-            return 0;
-      }
-      else if(type == POSITION_TYPE_SELL)
-      {
-         if(direction == 0)
-            direction = -1;
-         else if(direction != -1)
-            return 0;
-      }
-   }
-
-   return direction;
-}
-
-//==================================================================
-// GET CURRENT M1 CANDLE DATA
-//==================================================================
-
-bool GetCurrentM1Candle(
-   double &openPrice,
-   double &highPrice,
-   double &lowPrice,
-   double &currentPrice
-)
-{
-   MqlRates rates[];
-
-   ArraySetAsSeries(
-      rates,
-      true
-   );
-
-   int copied =
-      CopyRates(
-         Sym(),
-         PERIOD_M1,
-         0,
-         1,
-         rates
-      );
-
-   if(copied < 1)
-      return false;
-
-   openPrice =
-      rates[0].open;
-
-   highPrice =
-      rates[0].high;
-
-   lowPrice =
-      rates[0].low;
-
-   currentPrice =
-      SymbolInfoDouble(
-         Sym(),
-         SYMBOL_BID
-      );
-
-   return true;
-}
-
-//==================================================================
-// CALCULATE CURRENT M1 SIGNAL STRENGTH
-//
-// buyStrength  = 0 to 100
-// sellStrength = 0 to 100
-//==================================================================
-
-bool GetSignalStrength(
-   double &buyStrength,
-   double &sellStrength
-)
-{
-   buyStrength  = 0.0;
-   sellStrength = 0.0;
-
-   double openPrice;
-   double highPrice;
-   double lowPrice;
-   double currentPrice;
-
-   if(!GetCurrentM1Candle(
-      openPrice,
-      highPrice,
-      lowPrice,
-      currentPrice
-   ))
-   {
-      return false;
-   }
-
-   double range =
-      highPrice - lowPrice;
-
-   if(range <= 0.0)
-      return true;
-
-   double position =
-      (currentPrice - lowPrice) /
-      range;
-
-   if(position < 0.0)
-      position = 0.0;
-
-   if(position > 1.0)
-      position = 1.0;
-
-   // Current candle is bullish
-   if(currentPrice > openPrice)
-   {
-      buyStrength =
-         55.0 +
-         (position * 45.0);
-
-      sellStrength =
-         0.0;
-   }
-
-   // Current candle is bearish
-   else if(currentPrice < openPrice)
-   {
-      sellStrength =
-         55.0 +
-         ((1.0 - position) * 45.0);
-
-      buyStrength =
-         0.0;
-   }
-
-   // Candle currently exactly at open
-   else
-   {
-      buyStrength  = 0.0;
-      sellStrength = 0.0;
-   }
-
-   if(buyStrength > 100.0)
-      buyStrength = 100.0;
-
-   if(sellStrength > 100.0)
-      sellStrength = 100.0;
-
-   return true;
-}
-
-//==================================================================
-// SPREAD CHECK
-//==================================================================
-
-bool SpreadOK()
-{
-   double ask =
-      SymbolInfoDouble(
-         Sym(),
-         SYMBOL_ASK
-      );
-
-   double bid =
-      SymbolInfoDouble(
-         Sym(),
-         SYMBOL_BID
-      );
-
-   double pip =
-      PipSize(
-         Sym()
-      );
-
-   if(pip <= 0.0)
-      return false;
-
-   double spreadPips =
-      (ask - bid) / pip;
-
-   if(spreadPips >
-      MaximumSpreadPips)
-   {
-      return false;
-   }
-
-   return true;
-}
-
-//==================================================================
-// CURRENT SIGNAL
-//
-// Returns:
-//  1 = BUY
-// -1 = SELL
-//  0 = no valid signal
-//==================================================================
-
-int CurrentSignal(
-   double minimumStrength
-)
-{
-   double buyStrength;
-   double sellStrength;
-
-   if(!GetSignalStrength(
-      buyStrength,
-      sellStrength
-   ))
-   {
-      return 0;
-   }
-
-   if(
-      buyStrength >= minimumStrength &&
-      buyStrength > sellStrength
-   )
-   {
-      return 1;
-   }
-
-   if(
-      sellStrength >= minimumStrength &&
-      sellStrength > buyStrength
-   )
-   {
-      return -1;
-   }
-
-   return 0;
-}
-
-//==================================================================
-// CHECK WHETHER A NEW TRADE IS ALLOWED
-//==================================================================
-
-bool CanOpenNewTrades()
-{
-   if(!tradingEnabled)
-      return false;
-
-   if(tradingLocked)
-      return false;
-
-   if(!SpreadOK())
-      return false;
-
-   return true;
-}
-
-//==================================================================
-// END OF PART 1
-//==================================================================//==================================================================
-// CALCULATE DYNAMIC LOT
+// DYNAMIC LOT
 //==================================================================
 
 double CalculateDynamicLot()
@@ -689,6 +340,9 @@ double CalculateDynamicLot()
       AccountInfoDouble(
          ACCOUNT_BALANCE
       );
+
+   if(balance <= 0.0)
+      return 0.0;
 
    double lot =
       balance *
@@ -701,341 +355,198 @@ double CalculateDynamicLot()
 }
 
 //==================================================================
-// CALCULATE LOT TO USE
+// COUNT EA POSITIONS
 //==================================================================
 
-double GetTradeLot()
+int CountPositions()
 {
-   double lot = ManualLotSize;
+   int count = 0;
 
-   if(UseAutoLot)
+   for(
+      int i = PositionsTotal() - 1;
+      i >= 0;
+      i--
+   )
    {
-      lot = CalculateDynamicLot();
-   }
+      ulong ticket =
+         PositionGetTicket(i);
 
-   return NormalizeVolume(
-      Sym(),
-      lot
-   );
-}
+      if(ticket == 0)
+         continue;
 
-//==================================================================
-// ESTIMATE MARGIN FOR ONE TRADE
-//==================================================================
-
-double EstimateTradeMargin(
-   ENUM_ORDER_TYPE orderType,
-   double volume
-)
-{
-   double price;
-
-   if(orderType == ORDER_TYPE_BUY)
-   {
-      price =
-         SymbolInfoDouble(
-            Sym(),
-            SYMBOL_ASK
-         );
-   }
-   else
-   {
-      price =
-         SymbolInfoDouble(
-            Sym(),
-            SYMBOL_BID
-         );
-   }
-
-   double margin = 0.0;
-
-   if(
-      !OrderCalcMargin(
-         orderType,
-         Sym(),
-         volume,
-         price,
-         margin
+      if(
+         !PositionSelectByTicket(
+            ticket
+         )
       )
-   )
-   {
-      return 0.0;
-   }
+      {
+         continue;
+      }
 
-   return margin;
-}
-
-//==================================================================
-// CALCULATE HOW MANY POSITIONS CAN BE OPENED
-//
-// Maximum margin allowance = 50% of account balance.
-// Also respects MaximumOpenPositions and
-// MaximumEAExposureLots.
-//==================================================================
-
-int CalculateMaximumTrades(
-   ENUM_ORDER_TYPE orderType,
-   double lot
-)
-{
-   if(lot <= 0.0)
-      return 0;
-
-   double balance =
-      AccountInfoDouble(
-         ACCOUNT_BALANCE
-      );
-
-   double allowedMargin =
-      balance *
-      MaximumBalanceMarginPercent /
-      100.0;
-
-   double currentMargin =
-      AccountInfoDouble(
-         ACCOUNT_MARGIN
-      );
-
-   double remainingMargin =
-      allowedMargin -
-      currentMargin;
-
-   if(remainingMargin <= 0.0)
-      return 0;
-
-   double oneTradeMargin =
-      EstimateTradeMargin(
-         orderType,
-         lot
-      );
-
-   if(oneTradeMargin <= 0.0)
-      return 0;
-
-   int possible =
-      (int)MathFloor(
-         remainingMargin /
-         oneTradeMargin
-      );
-
-   // Respect maximum position count
-   if(MaximumOpenPositions > 0)
-   {
-      int remainingPositions =
-         MaximumOpenPositions -
-         CountPositions();
-
-      if(remainingPositions < possible)
-         possible =
-            remainingPositions;
-   }
-
-   // Respect maximum EA exposure in lots
-   if(MaximumEAExposureLots > 0.0)
-   {
-      double currentLots =
-         TotalEALots();
-
-      double remainingLots =
-         MaximumEAExposureLots -
-         currentLots;
-
-      int exposurePositions =
-         (int)MathFloor(
-            remainingLots /
-            lot
+      string symbol =
+         PositionGetString(
+            POSITION_SYMBOL
          );
 
-      if(exposurePositions < possible)
-         possible =
-            exposurePositions;
+      long magic =
+         PositionGetInteger(
+            POSITION_MAGIC
+         );
+
+      if(symbol != Sym())
+         continue;
+
+      if(
+         (ulong)magic !=
+         MagicNumber
+      )
+      {
+         continue;
+      }
+
+      count++;
    }
 
-   // Respect OrdersPerSignal when it is greater than zero
-   if(OrdersPerSignal > 0 &&
-      OrdersPerSignal < possible)
-   {
-      possible =
-         OrdersPerSignal;
-   }
-
-   if(possible < 1)
-      return 0;
-
-   return possible;
+   return count;
 }
 
 //==================================================================
-// CHECK MARGIN BEFORE TRADE
+// TOTAL EA LOTS
 //==================================================================
 
-bool EnoughMargin(
-   ENUM_ORDER_TYPE orderType,
-   double lot
-)
+double TotalLots()
 {
-   double balance =
-      AccountInfoDouble(
-         ACCOUNT_BALANCE
-      );
+   double lots = 0.0;
 
-   double allowedMargin =
-      balance *
-      MaximumBalanceMarginPercent /
-      100.0;
-
-   double currentMargin =
-      AccountInfoDouble(
-         ACCOUNT_MARGIN
-      );
-
-   double requiredMargin =
-      EstimateTradeMargin(
-         orderType,
-         lot
-      );
-
-   if(requiredMargin <= 0.0)
-      return false;
-
-   if(
-      currentMargin +
-      requiredMargin >
-      allowedMargin
+   for(
+      int i = PositionsTotal() - 1;
+      i >= 0;
+      i--
    )
    {
-      return false;
+      ulong ticket =
+         PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(
+         !PositionSelectByTicket(
+            ticket
+         )
+      )
+      {
+         continue;
+      }
+
+      string symbol =
+         PositionGetString(
+            POSITION_SYMBOL
+         );
+
+      long magic =
+         PositionGetInteger(
+            POSITION_MAGIC
+         );
+
+      if(symbol != Sym())
+         continue;
+
+      if(
+         (ulong)magic !=
+         MagicNumber
+      )
+      {
+         continue;
+      }
+
+      lots +=
+         PositionGetDouble(
+            POSITION_VOLUME
+         );
    }
 
-   return true;
+   return lots;
 }
 
 //==================================================================
-// OPEN ONE BUY TRADE
+// BASKET PROFIT
 //==================================================================
 
-bool OpenBuy()
+double BasketProfit()
 {
-   if(!CanOpenNewTrades())
-      return false;
+   double profit = 0.0;
 
-   double lot =
-      GetTradeLot();
-
-   if(lot <= 0.0)
-      return false;
-
-   if(!EnoughMargin(
-      ORDER_TYPE_BUY,
-      lot
-   ))
+   for(
+      int i = PositionsTotal() - 1;
+      i >= 0;
+      i--
+   )
    {
-      Print(
-         "CRT AI BOT: Not enough margin allowance for BUY."
-      );
+      ulong ticket =
+         PositionGetTicket(i);
 
-      return false;
+      if(ticket == 0)
+         continue;
+
+      if(
+         !PositionSelectByTicket(
+            ticket
+         )
+      )
+      {
+         continue;
+      }
+
+      string symbol =
+         PositionGetString(
+            POSITION_SYMBOL
+         );
+
+      long magic =
+         PositionGetInteger(
+            POSITION_MAGIC
+         );
+
+      if(symbol != Sym())
+         continue;
+
+      if(
+         (ulong)magic !=
+         MagicNumber
+      )
+      {
+         continue;
+      }
+
+      profit +=
+         PositionGetDouble(
+            POSITION_PROFIT
+         );
+
+      profit +=
+         PositionGetDouble(
+            POSITION_SWAP
+         );
    }
+
+   return profit;
+}
+
+//==================================================================
+// SPREAD CHECK
+//==================================================================
+
+bool SpreadOK()
+{
+   if(MaximumSpreadPips <= 0.0)
+      return true;
 
    double ask =
       SymbolInfoDouble(
          Sym(),
          SYMBOL_ASK
       );
-
-   double pip =
-      PipSize(
-         Sym()
-      );
-
-   double sl = 0.0;
-   double tp = 0.0;
-
-   if(
-      EmergencyStopLossPips > 0.0 &&
-      pip > 0.0
-   )
-   {
-      sl =
-         NormalizePrice(
-            Sym(),
-            ask -
-            EmergencyStopLossPips *
-            pip
-         );
-   }
-
-   if(
-      TakeProfitPips > 0.0 &&
-      pip > 0.0
-   )
-   {
-      tp =
-         NormalizePrice(
-            Sym(),
-            ask +
-            TakeProfitPips *
-            pip
-         );
-   }
-
-   bool result =
-      trade.Buy(
-         lot,
-         Sym(),
-         0.0,
-         sl,
-         tp,
-         "CRT AI BOT BUY"
-      );
-
-   if(!result)
-   {
-      Print(
-         "CRT AI BOT: BUY failed | ",
-         trade.ResultRetcodeDescription()
-      );
-
-      return false;
-   }
-
-   Print(
-      "CRT AI BOT: BUY opened | Lot = ",
-      DoubleToString(
-         lot,
-         2
-      )
-   );
-
-   return true;
-}
-
-//==================================================================
-// OPEN ONE SELL TRADE
-//==================================================================
-
-bool OpenSell()
-{
-   if(!CanOpenNewTrades())
-      return false;
-
-   double lot =
-      GetTradeLot();
-
-   if(lot <= 0.0)
-      return false;
-
-   if(!EnoughMargin(
-      ORDER_TYPE_SELL,
-      lot
-   ))
-   {
-      Print(
-         "CRT AI BOT: Not enough margin allowance for SELL."
-      );
-
-      return false;
-   }
 
    double bid =
       SymbolInfoDouble(
@@ -1048,211 +559,42 @@ bool OpenSell()
          Sym()
       );
 
-   double sl = 0.0;
-   double tp = 0.0;
-
    if(
-      EmergencyStopLossPips > 0.0 &&
-      pip > 0.0
+      ask <= 0.0 ||
+      bid <= 0.0 ||
+      pip <= 0.0
    )
    {
-      sl =
-         NormalizePrice(
-            Sym(),
-            bid +
-            EmergencyStopLossPips *
-            pip
-         );
+      return false;
    }
+
+   double spreadPips =
+      (ask - bid) / pip;
 
    if(
-      TakeProfitPips > 0.0 &&
-      pip > 0.0
+      spreadPips >
+      MaximumSpreadPips
    )
-   {
-      tp =
-         NormalizePrice(
-            Sym(),
-            bid -
-            TakeProfitPips *
-            pip
-         );
-   }
-
-   bool result =
-      trade.Sell(
-         lot,
-         Sym(),
-         0.0,
-         sl,
-         tp,
-         "CRT AI BOT SELL"
-      );
-
-   if(!result)
    {
       Print(
-         "CRT AI BOT: SELL failed | ",
-         trade.ResultRetcodeDescription()
+         "CRT AI BOT: Spread too high. ",
+         "Spread=",
+         DoubleToString(
+            spreadPips,
+            2
+         ),
+         " pips"
       );
 
       return false;
    }
 
-   Print(
-      "CRT AI BOT: SELL opened | Lot = ",
-      DoubleToString(
-         lot,
-         2
-      )
-   );
-
    return true;
 }
 
 //==================================================================
-// OPEN MULTIPLE BUY TRADES
-//==================================================================
-
-void OpenBuyBasket()
-{
-   if(!CanOpenNewTrades())
-      return;
-
-   double lot =
-      GetTradeLot();
-
-   if(lot <= 0.0)
-      return;
-
-   int numberOfTrades =
-      CalculateMaximumTrades(
-         ORDER_TYPE_BUY,
-         lot
-      );
-
-   if(numberOfTrades < 1)
-   {
-      Print(
-         "CRT AI BOT: No BUY trades allowed by margin/exposure limits."
-      );
-
-      return;
-   }
-
-   Print(
-      "CRT AI BOT: Opening BUY basket. Trades = ",
-      numberOfTrades,
-      " | Lot each = ",
-      DoubleToString(
-         lot,
-         2
-      )
-   );
-
-   for(
-      int i = 0;
-      i < numberOfTrades;
-      i++
-   )
-   {
-      if(!CanOpenNewTrades())
-         break;
-
-      if(!EnoughMargin(
-         ORDER_TYPE_BUY,
-         lot
-      ))
-      {
-         break;
-      }
-
-      if(!OpenBuy())
-         break;
-   }
-
-   if(CountPositions() > 0)
-   {
-      if(basketStartTime == 0)
-      {
-         basketStartTime =
-            TimeCurrent();
-      }
-   }
-}
-
-//==================================================================
-// OPEN MULTIPLE SELL TRADES
-//==================================================================
-
-void OpenSellBasket()
-{
-   if(!CanOpenNewTrades())
-      return;
-
-   double lot =
-      GetTradeLot();
-
-   if(lot <= 0.0)
-      return;
-
-   int numberOfTrades =
-      CalculateMaximumTrades(
-         ORDER_TYPE_SELL,
-         lot
-      );
-
-   if(numberOfTrades < 1)
-   {
-      Print(
-         "CRT AI BOT: No SELL trades allowed by margin/exposure limits."
-      );
-
-      return;
-   }
-
-   Print(
-      "CRT AI BOT: Opening SELL basket. Trades = ",
-      numberOfTrades,
-      " | Lot each = ",
-      DoubleToString(
-         lot,
-         2
-      )
-   );
-
-   for(
-      int i = 0;
-      i < numberOfTrades;
-      i++
-   )
-   {
-      if(!CanOpenNewTrades())
-         break;
-
-      if(!EnoughMargin(
-         ORDER_TYPE_SELL,
-         lot
-      ))
-      {
-         break;
-      }
-
-      if(!OpenSell())
-         break;
-   }
-
-   if(CountPositions() > 0)
-   {
-      if(basketStartTime == 0)
-      {
-         basketStartTime =
-            TimeCurrent();
-      }
-   }
-}
-
-//==================================================================
+// END OF PART 1
+//==================================================================//==================================================================
 // CLOSE ALL EA POSITIONS
 //==================================================================
 
@@ -1260,15 +602,12 @@ bool CloseAll(
    string reason
 )
 {
-   if(closingBasket)
-      return false;
-
    closingBasket = true;
 
    bool result = true;
 
    Print(
-      "CRT AI BOT: Closing basket. Reason: ",
+      "CRT AI BOT: Closing basket. Reason = ",
       reason
    );
 
@@ -1284,8 +623,14 @@ bool CloseAll(
       if(ticket == 0)
          continue;
 
-      if(!PositionSelectByTicket(ticket))
+      if(
+         !PositionSelectByTicket(
+            ticket
+         )
+      )
+      {
          continue;
+      }
 
       string symbol =
          PositionGetString(
@@ -1300,12 +645,18 @@ bool CloseAll(
       if(symbol != Sym())
          continue;
 
-      if(magic != MagicNumber)
+      if(
+         (ulong)magic !=
+         MagicNumber
+      )
+      {
          continue;
+      }
 
       if(
          !trade.PositionClose(
-            ticket
+            ticket,
+            SlippagePoints
          )
       )
       {
@@ -1320,14 +671,20 @@ bool CloseAll(
       }
    }
 
+   if(result)
+   {
+      protectionActive = false;
+      peakBasketProfit = 0.0;
+      protectionFlips = 0;
+      capitalProtectionTriggered = false;
+   }
+
    closingBasket = false;
 
    return result;
 }
 
 //==================================================================
-// END OF PART 2
-//==================================================================//==================================================================
 // UPDATE DAY
 //==================================================================
 
@@ -1341,18 +698,21 @@ void UpdateDay()
    );
 
    nowStruct.hour = 0;
-   nowStruct.min  = 0;
-   nowStruct.sec  = 0;
+   nowStruct.min = 0;
+   nowStruct.sec = 0;
 
    datetime today =
       StructToTime(
          nowStruct
       );
 
-   if(savedDay != today)
+   if(
+      savedDay !=
+      (int)today
+   )
    {
       savedDay =
-         today;
+         (int)today;
 
       dayStartEquity =
          AccountInfoDouble(
@@ -1363,13 +723,15 @@ void UpdateDay()
 
       tradingLocked = false;
 
-      peakBasketProfit = 0.0;
-
       protectionActive = false;
 
-      reentryPending = false;
+      peakBasketProfit = 0.0;
 
-      basketStartTime = 0;
+      protectionFlips = 0;
+
+      capitalProtectionTriggered = false;
+
+      reentryPending = false;
 
       Print(
          "CRT AI BOT: New trading day."
@@ -1388,79 +750,108 @@ void UpdateDay()
 //==================================================================
 // RISK CHECK
 //
-// Risk protection stops NEW trading.
-// It does NOT deliberately close a losing basket.
+// Daily loss and maximum drawdown are emergency protections.
+// They may close positions because they are account-safety limits.
+// Normal profit protection NEVER closes a losing basket.
 //==================================================================
 
 bool RiskOK()
 {
+   if(tradingLocked)
+      return false;
+
    double equity =
       AccountInfoDouble(
          ACCOUNT_EQUITY
       );
 
-   // Daily loss
-   if(dayStartEquity > 0.0)
-   {
-      double dailyLoss =
-         ((dayStartEquity - equity) /
-          dayStartEquity) *
-         100.0;
-
-      if(
-         dailyLoss >=
-         DailyLossLimitPercent
-      )
-      {
-         tradingLocked = true;
-
-         Print(
-            "CRT AI BOT: Daily loss limit reached: ",
-            DoubleToString(
-               dailyLoss,
-               2
-            ),
-            "%"
-         );
-
-         return false;
-      }
-   }
-
-   // Maximum drawdown
    double balance =
       AccountInfoDouble(
          ACCOUNT_BALANCE
       );
 
-   if(balance > 0.0)
+   if(
+      balance <= 0.0 ||
+      dayStartEquity <= 0.0
+   )
    {
-      double drawdown =
-         ((balance - equity) /
-          balance) *
-         100.0;
+      return false;
+   }
+
+   //---------------------------------------------------------------
+   // DAILY LOSS
+   //---------------------------------------------------------------
+
+   if(
+      DailyLossLimitPercent > 0.0
+   )
+   {
+      double loss =
+         dayStartEquity -
+         equity;
+
+      double lossPercent =
+         (
+            loss /
+            dayStartEquity
+         ) * 100.0;
 
       if(
-         drawdown >=
-         MaximumDrawdownPercent
+         lossPercent >=
+         DailyLossLimitPercent
       )
       {
          tradingLocked = true;
 
-         Print(
-            "CRT AI BOT: Maximum drawdown reached: ",
-            DoubleToString(
-               drawdown,
-               2
-            ),
-            "%"
+         tradingEnabled = false;
+
+         CloseAll(
+            "DAILY LOSS LIMIT"
          );
 
          return false;
       }
    }
 
-   // Consecutive losses
+   //---------------------------------------------------------------
+   // MAXIMUM DRAWDOWN
+   //---------------------------------------------------------------
+
+   if(
+      MaximumDrawdownPercent > 0.0
+   )
+   {
+      double drawdown =
+         balance -
+         equity;
+
+      double drawdownPercent =
+         (
+            drawdown /
+            balance
+         ) * 100.0;
+
+      if(
+         drawdownPercent >=
+         MaximumDrawdownPercent
+      )
+      {
+         tradingLocked = true;
+
+         tradingEnabled = false;
+
+         CloseAll(
+            "MAXIMUM DRAWDOWN"
+         );
+
+         return false;
+      }
+   }
+
+   //---------------------------------------------------------------
+   // CONSECUTIVE LOSSES
+   //---------------------------------------------------------------
+
    if(
       MaximumConsecutiveLosses > 0 &&
       consecutiveLosses >=
@@ -1469,8 +860,10 @@ bool RiskOK()
    {
       tradingLocked = true;
 
-      Print(
-         "CRT AI BOT: Consecutive-loss limit reached."
+      tradingEnabled = false;
+
+      CloseAll(
+         "MAXIMUM CONSECUTIVE LOSSES"
       );
 
       return false;
@@ -1480,19 +873,354 @@ bool RiskOK()
 }
 
 //==================================================================
-// CAPITAL PROTECTION
-//
-// If basket reaches -2% of account balance,
-// close the whole basket.
+// CURRENT FORMING M1 CANDLE DIRECTION
 //==================================================================
 
-void ManageMaximumBasketLoss()
+int CurrentCandleDirection()
 {
-   if(closingBasket)
-      return;
+   MqlRates rates[];
 
-   if(CountPositions() <= 0)
-      return;
+   ArraySetAsSeries(
+      rates,
+      true
+   );
+
+   if(
+      CopyRates(
+         Sym(),
+         PERIOD_M1,
+         0,
+         1,
+         rates
+      ) != 1
+   )
+   {
+      return 0;
+   }
+
+   double currentPrice =
+      SymbolInfoDouble(
+         Sym(),
+         SYMBOL_BID
+      );
+
+   if(
+      currentPrice >
+      rates[0].open
+   )
+   {
+      return 1;
+   }
+
+   if(
+      currentPrice <
+      rates[0].open
+   )
+   {
+      return -1;
+   }
+
+   return 0;
+}
+
+//==================================================================
+// BUY STRENGTH
+//==================================================================
+
+double CalculateBuyStrength()
+{
+   MqlRates rates[];
+
+   ArraySetAsSeries(
+      rates,
+      true
+   );
+
+   if(
+      CopyRates(
+         Sym(),
+         PERIOD_M1,
+         0,
+         1,
+         rates
+      ) != 1
+   )
+   {
+      return 0.0;
+   }
+
+   double openPrice =
+      rates[0].open;
+
+   double highPrice =
+      rates[0].high;
+
+   double lowPrice =
+      rates[0].low;
+
+   double bid =
+      SymbolInfoDouble(
+         Sym(),
+         SYMBOL_BID
+      );
+
+   if(
+      openPrice <= 0.0 ||
+      highPrice <= 0.0 ||
+      lowPrice <= 0.0 ||
+      bid <= 0.0
+   )
+   {
+      return 0.0;
+   }
+
+   double range =
+      highPrice -
+      lowPrice;
+
+   if(range <= 0.0)
+      return 0.0;
+
+   double position =
+      (
+         bid -
+         lowPrice
+      ) / range;
+
+   if(position < 0.0)
+      position = 0.0;
+
+   if(position > 1.0)
+      position = 1.0;
+
+   double strength = 0.0;
+
+   if(bid > openPrice)
+      strength += 55.0;
+
+   strength +=
+      position * 45.0;
+
+   if(strength > 100.0)
+      strength = 100.0;
+
+   return strength;
+}
+
+//==================================================================
+// SELL STRENGTH
+//==================================================================
+
+double CalculateSellStrength()
+{
+   MqlRates rates[];
+
+   ArraySetAsSeries(
+      rates,
+      true
+   );
+
+   if(
+      CopyRates(
+         Sym(),
+         PERIOD_M1,
+         0,
+         1,
+         rates
+      ) != 1
+   )
+   {
+      return 0.0;
+   }
+
+   double openPrice =
+      rates[0].open;
+
+   double highPrice =
+      rates[0].high;
+
+   double lowPrice =
+      rates[0].low;
+
+   double bid =
+      SymbolInfoDouble(
+         Sym(),
+         SYMBOL_BID
+      );
+
+   if(
+      openPrice <= 0.0 ||
+      highPrice <= 0.0 ||
+      lowPrice <= 0.0 ||
+      bid <= 0.0
+   )
+   {
+      return 0.0;
+   }
+
+   double range =
+      highPrice -
+      lowPrice;
+
+   if(range <= 0.0)
+      return 0.0;
+
+   double position =
+      (
+         bid -
+         lowPrice
+      ) / range;
+
+   if(position < 0.0)
+      position = 0.0;
+
+   if(position > 1.0)
+      position = 1.0;
+
+   double strength = 0.0;
+
+   if(bid < openPrice)
+      strength += 55.0;
+
+   strength +=
+      (1.0 - position) *
+      45.0;
+
+   if(strength > 100.0)
+      strength = 100.0;
+
+   return strength;
+}
+
+//==================================================================
+// SCAN CURRENT FORMING M1 CANDLE
+//==================================================================
+
+void ScanCurrentCandle()
+{
+   buyStrength =
+      CalculateBuyStrength();
+
+   sellStrength =
+      CalculateSellStrength();
+
+   //---------------------------------------------------------------
+   // BUY >= MINIMUM
+   //---------------------------------------------------------------
+
+   if(
+      buyStrength >=
+      MinimumSignalStrength &&
+      buyStrength >
+      sellStrength
+   )
+   {
+      signalText =
+         "BUY " +
+         DoubleToString(
+            buyStrength,
+            1
+         ) +
+         "%";
+   }
+
+   //---------------------------------------------------------------
+   // SELL >= MINIMUM
+   //---------------------------------------------------------------
+
+   else
+   if(
+      sellStrength >=
+      MinimumSignalStrength &&
+      sellStrength >
+      buyStrength
+   )
+   {
+      signalText =
+         "SELL " +
+         DoubleToString(
+            sellStrength,
+            1
+         ) +
+         "%";
+   }
+
+   //---------------------------------------------------------------
+   // WAIT
+   //---------------------------------------------------------------
+
+   else
+   {
+      signalText =
+         "WAIT B:" +
+         DoubleToString(
+            buyStrength,
+            1
+         ) +
+         " S:" +
+         DoubleToString(
+            sellStrength,
+            1
+         );
+   }
+
+   Print(
+      "CRT AI BOT: M1 CURRENT | BUY=",
+      DoubleToString(
+         buyStrength,
+         1
+      ),
+      "% | SELL=",
+      DoubleToString(
+         sellStrength,
+         1
+      ),
+      "%"
+   );
+
+   UpdateStatus();
+}
+
+//==================================================================
+// GET SIGNAL DIRECTION
+//==================================================================
+
+int GetSignalDirection()
+{
+   if(
+      buyStrength >=
+      MinimumSignalStrength &&
+      buyStrength >
+      sellStrength
+   )
+   {
+      return 1;
+   }
+
+   if(
+      sellStrength >=
+      MinimumSignalStrength &&
+      sellStrength >
+      buyStrength
+   )
+   {
+      return -1;
+   }
+
+   return 0;
+}
+
+//==================================================================
+// AUTOMATIC POSITION LIMIT
+//==================================================================
+
+int CalculateAutomaticPositionLimit(
+   bool buy,
+   double volume
+)
+{
+   if(volume <= 0.0)
+      return 0;
 
    double balance =
       AccountInfoDouble(
@@ -1500,134 +1228,433 @@ void ManageMaximumBasketLoss()
       );
 
    if(balance <= 0.0)
-      return;
+      return 0;
 
-   double currentProfit =
-      BasketProfit();
+   //---------------------------------------------------------------
+   // EXPOSURE LIMIT
+   //---------------------------------------------------------------
 
-   double maximumLoss =
-      balance *
-      MaximumBasketLossPercent /
-      100.0;
+   int exposureLimit = 1000000;
 
    if(
-      currentProfit <=
-      -maximumLoss
+      MaximumEAExposureLots >
+      0.0
+   )
+   {
+      exposureLimit =
+         (int)MathFloor(
+            MaximumEAExposureLots /
+            volume
+         );
+   }
+
+   if(exposureLimit < 1)
+      return 0;
+
+   //---------------------------------------------------------------
+   // MARGIN PER POSITION
+   //---------------------------------------------------------------
+
+   double price =
+      buy
+      ? SymbolInfoDouble(
+           Sym(),
+           SYMBOL_ASK
+        )
+      : SymbolInfoDouble(
+           Sym(),
+           SYMBOL_BID
+        );
+
+   ENUM_ORDER_TYPE orderType =
+      buy
+      ? ORDER_TYPE_BUY
+      : ORDER_TYPE_SELL;
+
+   double marginPerPosition = 0.0;
+
+   if(
+      !OrderCalcMargin(
+         orderType,
+         Sym(),
+         volume,
+         price,
+         marginPerPosition
+      )
    )
    {
       Print(
-         "CRT AI BOT: MAXIMUM BASKET LOSS reached. ",
-         "Basket = $",
-         DoubleToString(
-            currentProfit,
-            2
-         ),
-         " | Limit = -$",
-         DoubleToString(
-            maximumLoss,
-            2
-         )
+         "CRT AI BOT: Margin calculation failed. Error=",
+         GetLastError()
       );
 
-      reentryPending = true;
-
-      protectionActive = false;
-
-      peakBasketProfit = 0.0;
-
-      CloseAll(
-         "MAXIMUM BASKET LOSS 2%"
-      );
+      return exposureLimit;
    }
+
+   if(marginPerPosition <= 0.0)
+      return exposureLimit;
+
+   //---------------------------------------------------------------
+   // 50% BALANCE MARGIN LIMIT
+   //---------------------------------------------------------------
+
+   double maximumMargin =
+      balance *
+      MaximumBalanceMarginPercent /
+      100.0;
+
+   int marginLimit =
+      (int)MathFloor(
+         maximumMargin /
+         marginPerPosition
+      );
+
+   if(marginLimit < 1)
+      return 0;
+
+   int possible =
+      MathMin(
+         exposureLimit,
+         marginLimit
+      );
+
+   //---------------------------------------------------------------
+   // OPTIONAL MAX POSITION COUNT
+   //---------------------------------------------------------------
+
+   if(
+      MaximumOpenPositions >
+      0
+   )
+   {
+      int remaining =
+         MaximumOpenPositions -
+         CountPositions();
+
+      if(remaining < possible)
+         possible = remaining;
+   }
+
+   //---------------------------------------------------------------
+   // ORDERS PER SIGNAL
+   //---------------------------------------------------------------
+
+   if(
+      OrdersPerSignal >
+      0 &&
+      possible >
+      OrdersPerSignal
+   )
+   {
+      possible =
+         OrdersPerSignal;
+   }
+
+   if(possible < 1)
+      return 0;
+
+   return possible;
 }
 
 //==================================================================
-// LOSING BASKET TIME PROTECTION
-//
-// Closes a basket if it has remained losing for the
-// maximum permitted number of minutes.
+// OPEN ONE TRADE
 //==================================================================
 
-void ManageLosingBasketTime()
+bool OpenOne(
+   bool buy,
+   double volume,
+   string comment
+)
 {
-   if(closingBasket)
-      return;
+   if(volume <= 0.0)
+      return false;
 
-   if(CountPositions() <= 0)
-      return;
+   if(!tradingEnabled)
+      return false;
 
-   if(basketStartTime <= 0)
-   {
-      basketStartTime =
-         TimeCurrent();
+   if(tradingLocked)
+      return false;
 
-      return;
-   }
+   if(!SpreadOK())
+      return false;
 
-   double currentProfit =
-      BasketProfit();
+   trade.SetExpertMagicNumber(
+      MagicNumber
+   );
 
-   if(currentProfit >= 0.0)
-      return;
+   trade.SetDeviationInPoints(
+      SlippagePoints
+   );
 
-   int secondsAllowed =
-      MaximumLosingBasketMinutes *
-      60;
+   double price =
+      buy
+      ? SymbolInfoDouble(
+           Sym(),
+           SYMBOL_ASK
+        )
+      : SymbolInfoDouble(
+           Sym(),
+           SYMBOL_BID
+        );
 
-   if(secondsAllowed <= 0)
-      return;
+   if(price <= 0.0)
+      return false;
 
-   int secondsInBasket =
-      (int)(
-         TimeCurrent() -
-         basketStartTime
+   double pip =
+      PipSize(
+         Sym()
       );
 
-   if(secondsInBasket >= secondsAllowed)
+   double sl = 0.0;
+
+   double tp = 0.0;
+
+   //---------------------------------------------------------------
+   // OPTIONAL STOP LOSS
+   //---------------------------------------------------------------
+
+   if(
+      StopLossPips > 0.0 &&
+      pip > 0.0
+   )
+   {
+      if(buy)
+      {
+         sl =
+            price -
+            StopLossPips *
+            pip;
+      }
+      else
+      {
+         sl =
+            price +
+            StopLossPips *
+            pip;
+      }
+   }
+
+   //---------------------------------------------------------------
+   // OPTIONAL TAKE PROFIT
+   //---------------------------------------------------------------
+
+   if(
+      TakeProfitPips > 0.0 &&
+      pip > 0.0
+   )
+   {
+      if(buy)
+      {
+         tp =
+            price +
+            TakeProfitPips *
+            pip;
+      }
+      else
+      {
+         tp =
+            price -
+            TakeProfitPips *
+            pip;
+      }
+   }
+
+   bool result = false;
+
+   //---------------------------------------------------------------
+   // BUY
+   //---------------------------------------------------------------
+
+   if(buy)
+   {
+      result =
+         trade.Buy(
+            volume,
+            Sym(),
+            0.0,
+            sl,
+            tp,
+            comment
+         );
+   }
+
+   //---------------------------------------------------------------
+   // SELL
+   //---------------------------------------------------------------
+
+   else
+   {
+      result =
+         trade.Sell(
+            volume,
+            Sym(),
+            0.0,
+            sl,
+            tp,
+            comment
+         );
+   }
+
+   if(!result)
    {
       Print(
-         "CRT AI BOT: Losing basket time limit reached. ",
-         "Loss = $",
-         DoubleToString(
-            currentProfit,
-            2
-         )
+         "CRT AI BOT: Order failed. ",
+         "Retcode=",
+         trade.ResultRetcode(),
+         " ",
+         trade.ResultRetcodeDescription()
       );
 
-      reentryPending = true;
-
-      protectionActive = false;
-
-      peakBasketProfit = 0.0;
-
-      CloseAll(
-         "MAXIMUM LOSING BASKET TIME"
-      );
+      return false;
    }
+
+   Print(
+      "CRT AI BOT: ",
+      buy ? "BUY" : "SELL",
+      " opened | Lot=",
+      DoubleToString(
+         volume,
+         3
+      ),
+      " | ",
+      comment
+   );
+
+   return true;
 }
 
 //==================================================================
+// OPEN CURRENT SIGNAL
+//==================================================================
+
+void OpenCurrentDirection(
+   int direction
+)
+{
+   if(direction == 0)
+      return;
+
+   if(!tradingEnabled)
+      return;
+
+   if(tradingLocked)
+      return;
+
+   //---------------------------------------------------------------
+   // ONLY START A NEW BASKET WHEN OLD BASKET IS GONE
+   //---------------------------------------------------------------
+
+   if(CountPositions() > 0)
+      return;
+
+   double volume =
+      CalculateDynamicLot();
+
+   if(volume <= 0.0)
+      return;
+
+   if(
+      MaximumEAExposureLots > 0.0 &&
+      volume >
+      MaximumEAExposureLots
+   )
+   {
+      volume =
+         MaximumEAExposureLots;
+   }
+
+   volume =
+      NormalizeVolume(
+         Sym(),
+         volume
+      );
+
+   if(volume <= 0.0)
+      return;
+
+   bool buy =
+      direction > 0;
+
+   int positionsAllowed =
+      CalculateAutomaticPositionLimit(
+         buy,
+         volume
+      );
+
+   if(positionsAllowed <= 0)
+   {
+      Print(
+         "CRT AI BOT: No positions allowed by 50% margin/exposure limit."
+      );
+
+      return;
+   }
+
+   int opened = 0;
+
+   for(
+      int i = 0;
+      i < positionsAllowed;
+      i++
+   )
+   {
+      if(!tradingEnabled)
+         break;
+
+      if(tradingLocked)
+         break;
+
+      if(
+         MaximumEAExposureLots > 0.0 &&
+         TotalLots() +
+         volume >
+         MaximumEAExposureLots +
+         0.0000001
+      )
+      {
+         break;
+      }
+
+      if(
+         OpenOne(
+            buy,
+            volume,
+            "CRT AI MAIN"
+         )
+      )
+      {
+         opened++;
+      }
+      else
+      {
+         break;
+      }
+   }
+
+   Print(
+      "CRT AI BOT: ",
+      buy ? "BUY" : "SELL",
+      " basket opened. Positions=",
+      opened
+   );
+}
+
+//==================================================================
+// END OF PART 2
+//==================================================================//==================================================================
 // PROFIT PROTECTION
-//
-// Tracks the highest basket profit.
-// Closes only when:
-// 1. Basket is currently profitable.
-// 2. Protection has activated.
-// 3. Profit retraces 2% from peak profit.
 //==================================================================
 
 void ManageProfitProtection()
 {
-   if(closingBasket)
-      return;
+   int positions =
+      CountPositions();
 
-   if(CountPositions() <= 0)
+   if(positions <= 0)
    {
       protectionActive = false;
 
       peakBasketProfit = 0.0;
-
-      basketStartTime = 0;
 
       return;
    }
@@ -1635,17 +1662,23 @@ void ManageProfitProtection()
    double currentProfit =
       BasketProfit();
 
-   // NEVER close a losing basket using
-   // normal profit retracement.
-   if(currentProfit <= 0.0)
-      return;
+   //---------------------------------------------------------------
+   // LOSING BASKET IS NEVER CLOSED BY PROFIT PROTECTION
+   //---------------------------------------------------------------
 
-   // Activate protection once minimum profit is reached.
    if(
-      !protectionActive &&
-      currentProfit >=
+      currentProfit <
       MinimumProfitToProtect
    )
+   {
+      return;
+   }
+
+   //---------------------------------------------------------------
+   // FIRST PROFIT
+   //---------------------------------------------------------------
+
+   if(!protectionActive)
    {
       protectionActive = true;
 
@@ -1653,7 +1686,7 @@ void ManageProfitProtection()
          currentProfit;
 
       Print(
-         "CRT AI BOT: Profit protection activated. Peak = $",
+         "CRT AI BOT: Profit protection ACTIVE. Peak=$",
          DoubleToString(
             peakBasketProfit,
             2
@@ -1663,293 +1696,492 @@ void ManageProfitProtection()
       return;
    }
 
-   if(!protectionActive)
-      return;
+   //---------------------------------------------------------------
+   // NEW PROFIT HIGH
+   //---------------------------------------------------------------
 
-   // New profit peak
-   if(currentProfit > peakBasketProfit)
+   if(
+      currentProfit >
+      peakBasketProfit
+   )
    {
       peakBasketProfit =
          currentProfit;
 
-      return;
-   }
-
-   if(peakBasketProfit <= 0.0)
-      return;
-
-   double retracement =
-      peakBasketProfit *
-      ProfitRetracePercent /
-      100.0;
-
-   double closeLevel =
-      peakBasketProfit -
-      retracement;
-
-   // Only close while still profitable.
-   if(
-      currentProfit > 0.0 &&
-      currentProfit >=
-      MinimumProfitToProtect &&
-      currentProfit <= closeLevel
-   )
-   {
       Print(
-         "CRT AI BOT: Profit retracement reached. ",
-         "Peak = $",
+         "CRT AI BOT: New basket profit peak=$",
          DoubleToString(
             peakBasketProfit,
-            2
-         ),
-         " | Current = $",
-         DoubleToString(
-            currentProfit,
-            2
-         ),
-         " | Close level = $",
-         DoubleToString(
-            closeLevel,
             2
          )
       );
 
-      // MT5 closing is asynchronous.
-      // Re-entry happens only after positions
-      // are confirmed closed.
-      reentryPending = true;
+      return;
+   }
 
-      CloseAll(
-         "2% PROFIT RETRACEMENT"
+   //---------------------------------------------------------------
+   // 2% RETRACEMENT
+   //---------------------------------------------------------------
+
+   double retracement =
+      peakBasketProfit *
+      ProfitRetracementPercent /
+      100.0;
+
+   double protectionLevel =
+      peakBasketProfit -
+      retracement;
+
+   //---------------------------------------------------------------
+   // CLOSE ONLY AT PROFIT
+   //---------------------------------------------------------------
+
+   if(
+      currentProfit >=
+      MinimumProfitToProtect &&
+      currentProfit <=
+      protectionLevel
+   )
+   {
+      Print(
+         "CRT AI BOT: 2% PROFIT RETRACEMENT. ",
+         "Peak=$",
+         DoubleToString(
+            peakBasketProfit,
+            2
+         ),
+         " Current=$",
+         DoubleToString(
+            currentProfit,
+            2
+         )
       );
+
+      if(
+         CloseAll(
+            "2% PROFIT RETRACEMENT"
+         )
+      )
+      {
+         reentryPending = true;
+
+         //--------------------------------------------------------
+         // IMMEDIATE RE-ENTRY
+         //--------------------------------------------------------
+
+         if(
+            tradingEnabled &&
+            !tradingLocked &&
+            CountPositions() == 0
+         )
+         {
+            ScanCurrentCandle();
+
+            int direction =
+               GetSignalDirection();
+
+            if(direction != 0)
+            {
+               OpenCurrentDirection(
+                  direction
+               );
+
+               reentryPending = false;
+            }
+         }
+      }
    }
 }
 
 //==================================================================
-// REVERSAL PROTECTION
+// CAPITAL PROTECTION
 //
-// Losing BUY basket + SELL >= 65%
-//       -> close BUY basket
-//       -> wait for confirmed closure
-//       -> open SELL
-//
-// Losing SELL basket + BUY >= 65%
-//       -> close SELL basket
-//       -> wait for confirmed closure
-//       -> open BUY
+// IMPORTANT:
+// This does NOT close the losing basket.
+// Instead, it opens the OPPOSITE direction as a hedge.
 //==================================================================
 
-void ManageReversal()
+void ManageCapitalProtection()
 {
-   if(closingBasket)
+   if(!tradingEnabled)
       return;
 
-   if(CountPositions() <= 0)
+   if(tradingLocked)
+      return;
+
+   if(
+      CapitalProtectionPercent <= 0.0
+   )
+   {
+      return;
+   }
+
+   if(
+      MaximumProtectionFlips <= 0
+   )
+   {
+      return;
+   }
+
+   if(
+      protectionFlips >=
+      MaximumProtectionFlips
+   )
+   {
+      return;
+   }
+
+   if(
+      capitalProtectionTriggered
+   )
+   {
+      return;
+   }
+
+   int positions =
+      CountPositions();
+
+   if(positions <= 0)
+      return;
+
+   if(dayStartEquity <= 0.0)
       return;
 
    double currentProfit =
       BasketProfit();
 
-   // Reversal is only for a losing basket.
-   if(currentProfit >= 0.0)
-      return;
+   //---------------------------------------------------------------
+   // CAPITAL PROTECTION LOSS LEVEL
+   //---------------------------------------------------------------
 
-   int direction =
-      BasketDirection();
+   double protectionLoss =
+      dayStartEquity *
+      CapitalProtectionPercent /
+      100.0;
 
-   if(direction == 0)
-      return;
+   //---------------------------------------------------------------
+   // DO NOTHING WHILE BASKET IS ABOVE THE PROTECTION LEVEL
+   //---------------------------------------------------------------
 
-   double buyStrength;
-   double sellStrength;
-
-   if(!GetSignalStrength(
-      buyStrength,
-      sellStrength
-   ))
+   if(
+      currentProfit >
+      -protectionLoss
+   )
    {
       return;
    }
 
-   // Existing BUY basket.
-   if(direction == 1)
+   //---------------------------------------------------------------
+   // DETERMINE CURRENT MAIN DIRECTION
+   //---------------------------------------------------------------
+
+   int mainDirection = 0;
+
+   double buyLots = 0.0;
+
+   double sellLots = 0.0;
+
+   for(
+      int i = PositionsTotal() - 1;
+      i >= 0;
+      i--
+   )
    {
+      ulong ticket =
+         PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
       if(
-         sellStrength >=
-         ReversalSignalPercent
+         !PositionSelectByTicket(
+            ticket
+         )
       )
       {
-         Print(
-            "CRT AI BOT: BUY basket losing. ",
-            "Strong SELL reversal detected: ",
-            DoubleToString(
-               sellStrength,
-               1
-            ),
-            "%"
+         continue;
+      }
+
+      string symbol =
+         PositionGetString(
+            POSITION_SYMBOL
          );
 
-         reentryPending = true;
-
-         protectionActive = false;
-
-         peakBasketProfit = 0.0;
-
-         CloseAll(
-            "REVERSAL BUY TO SELL"
+      long magic =
+         PositionGetInteger(
+            POSITION_MAGIC
          );
 
-         return;
+      if(symbol != Sym())
+         continue;
+
+      if(
+         (ulong)magic !=
+         MagicNumber
+      )
+      {
+         continue;
+      }
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)
+         PositionGetInteger(
+            POSITION_TYPE
+         );
+
+      double volume =
+         PositionGetDouble(
+            POSITION_VOLUME
+         );
+
+      if(
+         type ==
+         POSITION_TYPE_BUY
+      )
+      {
+         buyLots += volume;
+      }
+      else
+      if(
+         type ==
+         POSITION_TYPE_SELL
+      )
+      {
+         sellLots += volume;
       }
    }
 
-   // Existing SELL basket.
-   if(direction == -1)
+   if(
+      buyLots >
+      sellLots
+   )
    {
-      if(
-         buyStrength >=
-         ReversalSignalPercent
+      mainDirection = 1;
+   }
+   else
+   if(
+      sellLots >
+      buyLots
+   )
+   {
+      mainDirection = -1;
+   }
+   else
+   {
+      //------------------------------------------------------------
+      // If equal, use current M1 direction.
+      //------------------------------------------------------------
+
+      mainDirection =
+         CurrentCandleDirection();
+   }
+
+   if(mainDirection == 0)
+      return;
+
+   //---------------------------------------------------------------
+   // OPPOSITE DIRECTION
+   //---------------------------------------------------------------
+
+   int oppositeDirection =
+      -mainDirection;
+
+   bool oppositeBuy =
+      oppositeDirection > 0;
+
+   double volume =
+      CalculateDynamicLot();
+
+   if(volume <= 0.0)
+      return;
+
+   volume =
+      NormalizeVolume(
+         Sym(),
+         volume
+      );
+
+   if(volume <= 0.0)
+      return;
+
+   //---------------------------------------------------------------
+   // RESPECT TOTAL EXPOSURE
+   //---------------------------------------------------------------
+
+   if(
+      MaximumEAExposureLots > 0.0 &&
+      TotalLots() +
+      volume >
+      MaximumEAExposureLots +
+      0.0000001
+   )
+   {
+      Print(
+         "CRT AI BOT: Capital protection wanted to hedge, ",
+         "but maximum exposure would be exceeded."
+      );
+
+      return;
+   }
+
+   //---------------------------------------------------------------
+   // CHECK REMAINING MARGIN ALLOWANCE
+   //---------------------------------------------------------------
+
+   int allowed =
+      CalculateAutomaticPositionLimit(
+         oppositeBuy,
+         volume
+      );
+
+   if(allowed <= 0)
+   {
+      Print(
+         "CRT AI BOT: Capital protection hedge blocked ",
+         "by 50% margin limit."
+      );
+
+      return;
+   }
+
+   //---------------------------------------------------------------
+   // OPEN ONE OPPOSITE PROTECTION TRADE
+   //---------------------------------------------------------------
+
+   if(
+      OpenOne(
+         oppositeBuy,
+         volume,
+         "CRT AI CAPITAL PROTECTION"
       )
-      {
-         Print(
-            "CRT AI BOT: SELL basket losing. ",
-            "Strong BUY reversal detected: ",
-            DoubleToString(
-               buyStrength,
-               1
-            ),
-            "%"
-         );
+   )
+   {
+      protectionFlips++;
 
-         reentryPending = true;
+      capitalProtectionTriggered = true;
 
-         protectionActive = false;
-
-         peakBasketProfit = 0.0;
-
-         CloseAll(
-            "REVERSAL SELL TO BUY"
-         );
-
-         return;
-      }
+      Print(
+         "CRT AI BOT: CAPITAL PROTECTION ACTIVATED. ",
+         "Opposite trade opened. Flip #",
+         protectionFlips
+      );
    }
 }
 
 //==================================================================
-// MANAGE FLIPPING / ENTRY
-//
-// If there is no basket, scan the CURRENT forming M1 candle.
-// No candle-close waiting.
+// NEW M1 CANDLE CHECK
+//==================================================================
+
+bool IsNewM1Candle()
+{
+   MqlRates rates[];
+
+   ArraySetAsSeries(
+      rates,
+      true
+   );
+
+   if(
+      CopyRates(
+         Sym(),
+         PERIOD_M1,
+         0,
+         1,
+         rates
+      ) != 1
+   )
+   {
+      return false;
+   }
+
+   datetime currentCandle =
+      rates[0].time;
+
+   if(
+      lastProcessedCandle == 0
+   )
+   {
+      lastProcessedCandle =
+         currentCandle;
+
+      return true;
+   }
+
+   if(
+      currentCandle !=
+      lastProcessedCandle
+   )
+   {
+      lastProcessedCandle =
+         currentCandle;
+
+      return true;
+   }
+
+   return false;
+}
+
+//==================================================================
+// FLIPPING MANAGER
 //==================================================================
 
 void ManageFlipping()
 {
-   // Existing basket
-   if(CountPositions() > 0)
-   {
-      // Start timer if necessary
-      if(basketStartTime == 0)
-      {
-         basketStartTime =
-            TimeCurrent();
-      }
-
-      return;
-   }
-
-   // Do not enter if risk protection has locked trading.
-   if(tradingLocked)
-      return;
-
    if(!tradingEnabled)
       return;
 
-   if(reentryPending)
-   {
-      // We are here only after MT5 confirms
-      // that the old basket no longer exists.
-      reentryPending = false;
+   if(tradingLocked)
+      return;
 
+   if(closingBasket)
+      return;
+
+   //---------------------------------------------------------------
+   // NO POSITIONS
+   //---------------------------------------------------------------
+
+   if(
+      CountPositions() == 0
+   )
+   {
       protectionActive = false;
 
       peakBasketProfit = 0.0;
 
-      basketStartTime = 0;
+      protectionFlips = 0;
 
-      Print(
-         "CRT AI BOT: Previous basket confirmed closed. ",
-         "Rescanning current M1 candle."
-      );
-   }
+      capitalProtectionTriggered = false;
 
-   int signal =
-      CurrentSignal(
-         BuySignalPercent
-      );
+      ScanCurrentCandle();
 
-   if(signal == 1)
-   {
-      double buyStrength;
-      double sellStrength;
+      int direction =
+         GetSignalDirection();
 
-      if(GetSignalStrength(
-         buyStrength,
-         sellStrength
-      ))
+      if(direction != 0)
       {
-         if(
-            buyStrength >=
-            BuySignalPercent
-         )
-         {
-            Print(
-               "CRT AI BOT: CURRENT M1 BUY signal = ",
-               DoubleToString(
-                  buyStrength,
-                  1
-               ),
-               "%"
-            );
-
-            OpenBuyBasket();
-         }
+         OpenCurrentDirection(
+            direction
+         );
       }
 
       return;
    }
 
-   double buyStrength;
-   double sellStrength;
+   //---------------------------------------------------------------
+   // CAPITAL PROTECTION FIRST
+   //---------------------------------------------------------------
 
-   if(!GetSignalStrength(
-      buyStrength,
-      sellStrength
-   ))
-   {
-      return;
-   }
+   ManageCapitalProtection();
 
-   if(
-      sellStrength >=
-      SellSignalPercent
-   )
-   {
-      Print(
-         "CRT AI BOT: CURRENT M1 SELL signal = ",
-         DoubleToString(
-            sellStrength,
-            1
-         ),
-         "%"
-      );
+   //---------------------------------------------------------------
+   // THEN PROFIT PROTECTION
+   //---------------------------------------------------------------
 
-      OpenSellBasket();
-   }
+   ManageProfitProtection();
 }
 
 //==================================================================
-// BUTTON CREATION
+// CREATE BUTTON
 //==================================================================
 
 void CreateButton(
@@ -1972,13 +2204,30 @@ void CreateButton(
       );
    }
 
-   ObjectCreate(
+   if(
+      !ObjectCreate(
+         0,
+         name,
+         OBJ_BUTTON,
+         0,
+         0,
+         0
+      )
+   )
+   {
+      Print(
+         "CRT AI BOT: Could not create button ",
+         name
+      );
+
+      return;
+   }
+
+   ObjectSetInteger(
       0,
       name,
-      OBJ_BUTTON,
-      0,
-      0,
-      0
+      OBJPROP_CORNER,
+      CORNER_RIGHT_UPPER
    );
 
    ObjectSetInteger(
@@ -1999,7 +2248,7 @@ void CreateButton(
       0,
       name,
       OBJPROP_XSIZE,
-      100
+      80
    );
 
    ObjectSetInteger(
@@ -2019,8 +2268,22 @@ void CreateButton(
    ObjectSetInteger(
       0,
       name,
-      OBJPROP_CORNER,
-      CORNER_LEFT_UPPER
+      OBJPROP_FONTSIZE,
+      10
+   );
+
+   ObjectSetInteger(
+      0,
+      name,
+      OBJPROP_SELECTABLE,
+      false
+   );
+
+   ObjectSetInteger(
+      0,
+      name,
+      OBJPROP_HIDDEN,
+      false
    );
 }
 
@@ -2030,65 +2293,113 @@ void CreateButton(
 
 void UpdateStatus()
 {
-   string status =
-      "CRT AI BOT\n";
-
-   status +=
-      "Trading: ";
-
-   if(tradingEnabled)
-      status += "ON\n";
-   else
-      status += "OFF\n";
-
-   status +=
-      "Locked: ";
+   string status;
 
    if(tradingLocked)
-      status += "YES\n";
-   else
-      status += "NO\n";
-
-   double buyStrength;
-   double sellStrength;
-
-   if(GetSignalStrength(
-      buyStrength,
-      sellStrength
-   ))
    {
-      status +=
-         "M1 BUY: " +
-         DoubleToString(
-            buyStrength,
-            1
-         ) +
-         "%\n";
-
-      status +=
-         "M1 SELL: " +
-         DoubleToString(
-            sellStrength,
-            1
-         ) +
-         "%\n";
+      status =
+         "CRT AI BOT: LOCKED";
+   }
+   else
+   if(tradingEnabled)
+   {
+      status =
+         "CRT AI BOT: RUNNING";
+   }
+   else
+   {
+      status =
+         "CRT AI BOT: STOPPED";
    }
 
    status +=
-      "Positions: " +
-      IntegerToString(
-         CountPositions()
-      ) +
-      "\n";
+      "\nSignal: " +
+      signalText;
 
    status +=
-      "Basket: $" +
+      "\nBUY: " +
+      DoubleToString(
+         buyStrength,
+         1
+      ) +
+      "%";
+
+   status +=
+      " SELL: " +
+      DoubleToString(
+         sellStrength,
+         1
+      ) +
+      "%";
+
+   status +=
+      "\nPositions: " +
+      IntegerToString(
+         CountPositions()
+      );
+
+   status +=
+      "\nBasket Profit: $" +
       DoubleToString(
          BasketProfit(),
          2
       );
 
-   Comment(
+   status +=
+      "\nProtection flips: " +
+      IntegerToString(
+         protectionFlips
+      );
+
+   if(
+      ObjectFind(
+         0,
+         STATUS_LABEL
+      ) < 0
+   )
+   {
+      ObjectCreate(
+         0,
+         STATUS_LABEL,
+         OBJ_LABEL,
+         0,
+         0,
+         0
+      );
+
+      ObjectSetInteger(
+         0,
+         STATUS_LABEL,
+         OBJPROP_CORNER,
+         CORNER_LEFT_UPPER
+      );
+
+      ObjectSetInteger(
+         0,
+         STATUS_LABEL,
+         OBJPROP_XDISTANCE,
+         10
+      );
+
+      ObjectSetInteger(
+         0,
+         STATUS_LABEL,
+         OBJPROP_YDISTANCE,
+         20
+      );
+
+      ObjectSetInteger(
+         0,
+         STATUS_LABEL,
+         OBJPROP_FONTSIZE,
+         10
+      );
+   }
+
+   ObjectSetString(
+      0,
+      STATUS_LABEL,
+      OBJPROP_TEXT,
       status
    );
 }
@@ -2099,6 +2410,21 @@ void UpdateStatus()
 
 int OnInit()
 {
+   if(
+      !SymbolSelect(
+         Sym(),
+         true
+      )
+   )
+   {
+      Print(
+         "CRT AI BOT: Cannot select symbol ",
+         Sym()
+      );
+
+      return INIT_FAILED;
+   }
+
    trade.SetExpertMagicNumber(
       MagicNumber
    );
@@ -2113,34 +2439,110 @@ int OnInit()
 
    tradingLocked = false;
 
-   reentryPending = false;
-
    protectionActive = false;
-
-   peakBasketProfit = 0.0;
-
-   basketStartTime = 0;
 
    closingBasket = false;
 
+   reentryPending = false;
+
+   capitalProtectionTriggered = false;
+
+   peakBasketProfit = 0.0;
+
+   buyStrength = 0.0;
+
+   sellStrength = 0.0;
+
+   protectionFlips = 0;
+
+   signalText = "WAIT";
+
+   lastProcessedCandle = 0;
+
+   //---------------------------------------------------------------
+   // BUTTONS ARE NOW ON THE RIGHT SIDE
+   //---------------------------------------------------------------
+
    CreateButton(
-      "CRT_START",
+      START_BUTTON,
       "START",
-      10,
+      190,
       20
    );
 
    CreateButton(
-      "CRT_STOP",
+      STOP_BUTTON,
       "STOP",
-      120,
+      100,
       20
    );
 
    UpdateStatus();
 
    Print(
-      "CRT AI BOT: Initialized successfully."
+      "=================================================="
+   );
+
+   Print(
+      "CRT AI BOT v11.00"
+   );
+
+   Print(
+      "CURRENT FORMING M1 CANDLE"
+   );
+
+   Print(
+      "BUY >= ",
+      DoubleToString(
+         MinimumSignalStrength,
+         1
+      ),
+      "%"
+   );
+
+   Print(
+      "SELL >= ",
+      DoubleToString(
+         MinimumSignalStrength,
+         1
+      ),
+      "%"
+   );
+
+   Print(
+      "Profit retracement = ",
+      DoubleToString(
+         ProfitRetracementPercent,
+         2
+      ),
+      "%"
+   );
+
+   Print(
+      "Maximum margin = ",
+      DoubleToString(
+         MaximumBalanceMarginPercent,
+         1
+      ),
+      "%"
+   );
+
+   Print(
+      "Capital protection = ",
+      DoubleToString(
+         CapitalProtectionPercent,
+         2
+      ),
+      "%"
+   );
+
+   Print(
+      "Maximum protection flips = ",
+      MaximumProtectionFlips
+   );
+
+   Print(
+      "=================================================="
    );
 
    return INIT_SUCCEEDED;
@@ -2156,19 +2558,22 @@ void OnDeinit(
 {
    ObjectDelete(
       0,
-      "CRT_START"
+      START_BUTTON
    );
 
    ObjectDelete(
       0,
-      "CRT_STOP"
+      STOP_BUTTON
    );
 
-   Comment("");
+   ObjectDelete(
+      0,
+      STATUS_LABEL
+   );
 }
 
 //==================================================================
-// MAIN TICK
+// ON TICK
 //==================================================================
 
 void OnTick()
@@ -2177,36 +2582,18 @@ void OnTick()
 
    UpdateStatus();
 
-   // Always manage existing positions first.
-   // This allows protection to continue even if
-   // new trading has been locked.
-   if(CountPositions() > 0)
-   {
-      ManageMaximumBasketLoss();
-
-      if(!closingBasket)
-         ManageReversal();
-
-      if(!closingBasket)
-         ManageLosingBasketTime();
-
-      if(!closingBasket)
-         ManageProfitProtection();
-   }
-
-   // No new trades after manual STOP.
    if(!tradingEnabled)
       return;
 
-   // Risk protection prevents NEW trades.
    if(tradingLocked)
       return;
 
-   // Open/re-enter according to CURRENT forming M1 candle.
-   if(CountPositions() == 0)
-   {
-      ManageFlipping();
-   }
+   if(!RiskOK())
+      return;
+
+   ManageFlipping();
+
+   UpdateStatus();
 }
 
 //==================================================================
@@ -2221,66 +2608,91 @@ void OnChartEvent(
 )
 {
    if(
-      id != CHARTEVENT_OBJECT_CLICK
+      id !=
+      CHARTEVENT_OBJECT_CLICK
    )
    {
       return;
    }
 
-   //===============================================================
+   //---------------------------------------------------------------
    // START
-   //===============================================================
+   //---------------------------------------------------------------
 
-   if(sparam == "CRT_START")
+   if(
+      sparam ==
+      START_BUTTON
+   )
    {
-      tradingEnabled = true;
+      if(tradingLocked)
+      {
+         Print(
+            "CRT AI BOT: START blocked. ",
+            "Risk protection is active."
+         );
 
-      tradingLocked = false;
+         return;
+      }
+
+      tradingEnabled = true;
 
       reentryPending = false;
 
       Print(
-         "CRT AI BOT: START pressed."
+         "CRT AI BOT: START PRESSED."
       );
 
-      Print(
-         "CRT AI BOT: Scanning CURRENT forming M1 candle."
-      );
+      //------------------------------------------------------------
+      // IMMEDIATE CURRENT M1 SCAN
+      //------------------------------------------------------------
 
-      // Immediately scan current candle.
+      ScanCurrentCandle();
+
+      int direction =
+         GetSignalDirection();
+
       if(
+         direction != 0 &&
          CountPositions() == 0
       )
       {
-         ManageFlipping();
+         OpenCurrentDirection(
+            direction
+         );
       }
+      else
+      {
+         Print(
+            "CRT AI BOT: STARTED but no qualifying ",
+            "55%+ signal at this tick."
+         );
+      }
+
+      UpdateStatus();
 
       return;
    }
 
-   //===============================================================
+   //---------------------------------------------------------------
    // STOP
-   //===============================================================
+   //---------------------------------------------------------------
 
-   if(sparam == "CRT_STOP")
+   if(
+      sparam ==
+      STOP_BUTTON
+   )
    {
       tradingEnabled = false;
 
-      reentryPending = false;
-
       Print(
-         "CRT AI BOT: STOP pressed. ",
-         "Closing EA positions."
+         "CRT AI BOT: STOP PRESSED."
       );
 
-      if(
-         CountPositions() > 0
-      )
-      {
-         CloseAll(
-            "MANUAL STOP"
-         );
-      }
+      CloseAll(
+         "MANUAL STOP"
+      );
+
+      UpdateStatus();
 
       return;
    }
@@ -2296,7 +2708,6 @@ void OnTradeTransaction(
    const MqlTradeResult &result
 )
 {
-   // Only process newly added deals.
    if(
       trans.type !=
       TRADE_TRANSACTION_DEAL_ADD
@@ -2317,138 +2728,142 @@ void OnTradeTransaction(
       return;
    }
 
-   // Only process closing deals.
-   long entryType =
+   //---------------------------------------------------------------
+   // ONLY EXIT DEALS
+   //---------------------------------------------------------------
+
+   long entry =
       HistoryDealGetInteger(
          trans.deal,
          DEAL_ENTRY
       );
 
    if(
-      entryType != DEAL_ENTRY_OUT &&
-      entryType != DEAL_ENTRY_OUT_BY
+      entry != DEAL_ENTRY_OUT &&
+      entry != DEAL_ENTRY_OUT_BY
    )
    {
       return;
    }
 
-   string dealSymbol =
-      HistoryDealGetString(
-         trans.deal,
-         DEAL_SYMBOL
-      );
+   //---------------------------------------------------------------
+   // MAGIC
+   //---------------------------------------------------------------
 
-   if(
-      dealSymbol != Sym()
-   )
-   {
-      return;
-   }
-
-   long dealMagic =
+   long magic =
       HistoryDealGetInteger(
          trans.deal,
          DEAL_MAGIC
       );
 
    if(
-      dealMagic != MagicNumber
+      (ulong)magic !=
+      MagicNumber
    )
    {
       return;
    }
 
-   double dealProfit =
+   //---------------------------------------------------------------
+   // SYMBOL
+   //---------------------------------------------------------------
+
+   string symbol =
+      HistoryDealGetString(
+         trans.deal,
+         DEAL_SYMBOL
+      );
+
+   if(
+      symbol !=
+      Sym()
+   )
+   {
+      return;
+   }
+
+   //---------------------------------------------------------------
+   // NET RESULT
+   //---------------------------------------------------------------
+
+   double profit =
       HistoryDealGetDouble(
          trans.deal,
          DEAL_PROFIT
       );
 
-   double dealSwap =
+   double swap =
       HistoryDealGetDouble(
          trans.deal,
          DEAL_SWAP
       );
 
-   double dealCommission =
+   double commission =
       HistoryDealGetDouble(
          trans.deal,
          DEAL_COMMISSION
       );
 
    double netProfit =
-      dealProfit +
-      dealSwap +
-      dealCommission;
+      profit +
+      swap +
+      commission;
 
-   //===============================================================
-   // CONSECUTIVE LOSS TRACKING
-   //===============================================================
+   //---------------------------------------------------------------
+   // LOSS
+   //---------------------------------------------------------------
 
    if(netProfit < 0.0)
    {
       consecutiveLosses++;
 
       Print(
-         "CRT AI BOT: Losing deal = $",
-         DoubleToString(
-            netProfit,
-            2
-         ),
-         " | Consecutive losses = ",
+         "CRT AI BOT: Losing deal. ",
+         "Consecutive losses=",
          consecutiveLosses
       );
-
-      if(
-         MaximumConsecutiveLosses > 0 &&
-         consecutiveLosses >=
-         MaximumConsecutiveLosses
-      )
-      {
-         tradingLocked = true;
-
-         Print(
-            "CRT AI BOT: Maximum consecutive losses reached. ",
-            "New trades locked."
-         );
-      }
    }
-   else if(netProfit > 0.0)
+
+   //---------------------------------------------------------------
+   // PROFIT
+   //---------------------------------------------------------------
+
+   else
+   if(netProfit > 0.0)
    {
       consecutiveLosses = 0;
 
       Print(
-         "CRT AI BOT: Winning deal = $",
-         DoubleToString(
-            netProfit,
-            2
-         ),
-         " | Consecutive losses reset."
+         "CRT AI BOT: Profitable deal. ",
+         "Consecutive losses reset."
       );
    }
 
-   //===============================================================
-   // CONFIRM COMPLETE BASKET CLOSURE
-   //===============================================================
+   //---------------------------------------------------------------
+   // MAX CONSECUTIVE LOSSES
+   //---------------------------------------------------------------
 
    if(
-      CountPositions() == 0
+      MaximumConsecutiveLosses > 0 &&
+      consecutiveLosses >=
+      MaximumConsecutiveLosses
    )
    {
-      protectionActive = false;
+      tradingLocked = true;
 
-      peakBasketProfit = 0.0;
+      tradingEnabled = false;
 
-      basketStartTime = 0;
+      CloseAll(
+         "MAXIMUM CONSECUTIVE LOSSES"
+      );
 
-      if(reentryPending)
-      {
-         Print(
-            "CRT AI BOT: Basket closure confirmed. ",
-            "Current forming M1 candle will be rescanned."
-         );
-      }
+      Print(
+         "CRT AI BOT: LOCKED BY MAXIMUM ",
+         "CONSECUTIVE LOSSES."
+      );
    }
 }
 
+//+------------------------------------------------------------------+
+//| END OF CRT AI BOT v11.00                                        |
 //+------------------------------------------------------------------+
