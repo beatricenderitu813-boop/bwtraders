@@ -1920,10 +1920,38 @@ void OnTick()
    if(!RiskOK())
       return;
 
-   //--------------------------------------------------------------
-   // THIS RUNS ON EVERY MARKET TICK.
-   // THERE IS NO WAIT FOR CANDLE CLOSE.
-   //--------------------------------------------------------------
+   //==============================================================
+   // AUTOMATIC RE-ENTRY
+   // If the previous basket has completely closed,
+   // immediately allow a new basket.
+   //
+   // IMPORTANT:
+   // CurrentCandleDirection() uses the CURRENT FORMING M1 candle.
+   // There is NO waiting for the candle to close.
+   //==============================================================
+
+   if(CountPositions() == 0)
+   {
+      closingBasket = false;
+      protectionActive = false;
+      peakPrice = 0.0;
+
+      int direction =
+         CurrentCandleDirection();
+
+      if(direction != 0)
+      {
+         OpenCurrentDirection(
+            direction
+         );
+      }
+
+      return;
+   }
+
+   //==============================================================
+   // MANAGE CURRENT BASKET
+   //==============================================================
 
    ManageFlipping();
 }
