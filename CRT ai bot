@@ -1,9 +1,9 @@
 //+------------------------------------------------------------------+
-//| CRT AI BOT - M1 REAL-TIME FLIPPING ROBOT                        |
-//| Multiple trades + 50% margin allocation + 2 pip protection      |
+//| CRT AI BOT - M1 REAL-TIME PROFIT PROTECTION                     |
+//| Current candle direction + multiple trades + auto re-entry       |
 //+------------------------------------------------------------------+
 #property strict
-#property version "7.10"
+#property version   "8.00"
 
 #include <Trade/Trade.mqh>
 
@@ -16,55 +16,38 @@ CTrade trade;
 input string TradingSymbol = "";
 
 input double LotMultiplier = 0.001;
+input int    OrdersPerSignal = 0;
 
-// 0 = automatic calculation.
-input int OrdersPerSignal = 0;
-
-// 0 = automatic calculation.
-input int MaximumOpenPositions = 0;
-
-// Maximum percentage of account balance allocated to margin.
+input int    MaximumOpenPositions = 0;
 input double MaximumBalanceMarginPercent = 50.0;
-
-// Maximum total EA lots.
 input double MaximumEAExposureLots = 10.0;
 
-// Minimum floating profit before protection activates.
 input double MinimumProfitToProtect = 0.01;
-
-// Profit protection retracement in pips.
 input double ProfitRetracementPips = 2.0;
 
-// Execution.
-input int SlippagePoints = 20;
+input int    SlippagePoints = 20;
 
-// Optional SL / TP.
-// 0 = disabled.
 input double StopLossPips = 0.0;
 input double TakeProfitPips = 0.0;
 
-// Risk protection.
 input double DailyLossLimitPercent = 2.0;
 input double MaximumDrawdownPercent = 5.0;
-input int MaximumConsecutiveLosses = 3;
+input int    MaximumConsecutiveLosses = 3;
 
-// Magic.
-input ulong MagicNumber = 26082026;
+input ulong  MagicNumber = 26082026;
 
 //==================================================================
-// INTERNAL VARIABLES
+// GLOBAL VARIABLES
 //==================================================================
 
 bool tradingEnabled = false;
 bool tradingLocked = false;
-bool closingBasket = false;
 
 double dayStartEquity = 0.0;
 
 int savedDay = -1;
 int consecutiveLosses = 0;
 
-// Profit protection.
 bool protectionActive = false;
 double peakPrice = 0.0;
 
@@ -77,26 +60,43 @@ string STATUS_LABEL = "CRT_STATUS_LABEL";
 //==================================================================
 
 string Sym();
-double PipSize(string s);
-double NormalizeVolume(string s,double volume);
+
+double PipSize(string symbol);
+
+double NormalizeVolume(string symbol,double volume);
+
 double CalculateDynamicLot();
+
 int CountPositions();
+
 double TotalLots();
+
 double BasketProfit();
+
 bool CloseAll(string reason);
+
 void UpdateDay();
+
 void UpdateStatus();
+
 bool RiskOK();
+
 int CurrentCandleDirection();
+
 int CalculateAutomaticPositionLimit(bool buy,double volume);
+
 bool OpenOne(bool buy,double volume);
+
 void OpenCurrentDirection(int direction);
-void ManageFlipping();
+
 void ManageProfitProtection();
+
+void ManageFlipping();
+
 void CreateButton(string name,string text,int x,int y);
 
 //==================================================================
-// RETURN SYMBOL
+// SYMBOL
 //==================================================================
 
 string Sym()
@@ -111,22 +111,10 @@ string Sym()
 // PIP SIZE
 //==================================================================
 
-double PipSize(string s)
+double PipSize(string symbol)
 {
-   double point =
-      SymbolInfoDouble(
-         s,
-         SYMBOL_POINT
-      );
-
-   int digits =
-      (int)SymbolInfoInteger(
-         s,
-         SYMBOL_DIGITS
-      );
-
-   if(point <= 0)
-      return 0;
+   double point = SymbolInfoDouble(symbol,SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(symbol,SYMBOL_DIGITS);
 
    if(digits == 3 || digits == 5)
       return point * 10.0;
@@ -135,72 +123,36 @@ double PipSize(string s)
 }
 
 //==================================================================
-// NORMALIZE LOT
+// NORMALIZE VOLUME
 //==================================================================
 
-double NormalizeVolume(
-   string s,
-   double volume
-)
+double NormalizeVolume(string symbol,double volume)
 {
-   double minVolume =
-      SymbolInfoDouble(
-         s,
-         SYMBOL_VOLUME_MIN
-      );
+   double minLot =
+      SymbolInfoDouble(symbol,SYMBOL_VOLUME_MIN);
 
-   double maxVolume =
-      SymbolInfoDouble(
-         s,
-         SYMBOL_VOLUME_MAX
-      );
+   double maxLot =
+      SymbolInfoDouble(symbol,SYMBOL_VOLUME_MAX);
 
    double step =
-      SymbolInfoDouble(
-         s,
-         SYMBOL_VOLUME_STEP
-      );
+      SymbolInfoDouble(symbol,SYMBOL_VOLUME_STEP);
 
-   if(
-      minVolume <= 0 ||
-      maxVolume <= 0
-   )
-   {
-      return 0;
-   }
+   if(step <= 0.0)
+      step = minLot;
 
-   if(step <= 0)
-      step = minVolume;
+   if(volume < minLot)
+      volume = minLot;
+
+   if(volume > maxLot)
+      volume = maxLot;
 
    volume =
-      MathMax(
-         volume,
-         minVolume
-      );
+      MathFloor(volume / step) * step;
 
-   volume =
-      MathMin(
-         volume,
-         maxVolume
-      );
+   if(volume < minLot)
+      volume = minLot;
 
-   volume =
-      MathFloor(
-         volume / step + 1e-9
-      ) * step;
-
-   int digits = 2;
-
-   if(step < 0.01)
-      digits = 3;
-
-   if(step < 0.001)
-      digits = 4;
-
-   return NormalizeDouble(
-      volume,
-      digits
-   );
+   return NormalizeDouble(volume,2);
 }
 
 //==================================================================
@@ -210,9 +162,7 @@ double NormalizeVolume(
 double CalculateDynamicLot()
 {
    double balance =
-      AccountInfoDouble(
-         ACCOUNT_BALANCE
-      );
+      AccountInfoDouble(ACCOUNT_BALANCE);
 
    double rawLot =
       balance * LotMultiplier;
@@ -231,13 +181,7 @@ int CountPositions()
 {
    int count = 0;
 
-   string s = Sym();
-
-   for(
-      int i = PositionsTotal() - 1;
-      i >= 0;
-      i--
-   )
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket =
          PositionGetTicket(i);
@@ -248,23 +192,17 @@ int CountPositions()
       if(!PositionSelectByTicket(ticket))
          continue;
 
-      if(
-         PositionGetString(
-            POSITION_SYMBOL
-         ) != s
-      )
-      {
-         continue;
-      }
+      string symbol =
+         PositionGetString(POSITION_SYMBOL);
 
-      if(
-         (ulong)PositionGetInteger(
-            POSITION_MAGIC
-         ) != MagicNumber
-      )
-      {
+      long magic =
+         PositionGetInteger(POSITION_MAGIC);
+
+      if(symbol != Sym())
          continue;
-      }
+
+      if((ulong)magic != MagicNumber)
+         continue;
 
       count++;
    }
@@ -278,15 +216,9 @@ int CountPositions()
 
 double TotalLots()
 {
-   double lots = 0;
+   double lots = 0.0;
 
-   string s = Sym();
-
-   for(
-      int i = PositionsTotal() - 1;
-      i >= 0;
-      i--
-   )
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket =
          PositionGetTicket(i);
@@ -297,28 +229,20 @@ double TotalLots()
       if(!PositionSelectByTicket(ticket))
          continue;
 
-      if(
-         PositionGetString(
-            POSITION_SYMBOL
-         ) != s
-      )
-      {
-         continue;
-      }
+      string symbol =
+         PositionGetString(POSITION_SYMBOL);
 
-      if(
-         (ulong)PositionGetInteger(
-            POSITION_MAGIC
-         ) != MagicNumber
-      )
-      {
+      long magic =
+         PositionGetInteger(POSITION_MAGIC);
+
+      if(symbol != Sym())
          continue;
-      }
+
+      if((ulong)magic != MagicNumber)
+         continue;
 
       lots +=
-         PositionGetDouble(
-            POSITION_VOLUME
-         );
+         PositionGetDouble(POSITION_VOLUME);
    }
 
    return lots;
@@ -330,15 +254,9 @@ double TotalLots()
 
 double BasketProfit()
 {
-   double profit = 0;
+   double profit = 0.0;
 
-   string s = Sym();
-
-   for(
-      int i = PositionsTotal() - 1;
-      i >= 0;
-      i--
-   )
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket =
          PositionGetTicket(i);
@@ -349,60 +267,37 @@ double BasketProfit()
       if(!PositionSelectByTicket(ticket))
          continue;
 
-      if(
-         PositionGetString(
-            POSITION_SYMBOL
-         ) != s
-      )
-      {
-         continue;
-      }
+      string symbol =
+         PositionGetString(POSITION_SYMBOL);
 
-      if(
-         (ulong)PositionGetInteger(
-            POSITION_MAGIC
-         ) != MagicNumber
-      )
-      {
+      long magic =
+         PositionGetInteger(POSITION_MAGIC);
+
+      if(symbol != Sym())
          continue;
-      }
+
+      if((ulong)magic != MagicNumber)
+         continue;
 
       profit +=
-         PositionGetDouble(
-            POSITION_PROFIT
-         );
+         PositionGetDouble(POSITION_PROFIT);
 
       profit +=
-         PositionGetDouble(
-            POSITION_SWAP
-         );
+         PositionGetDouble(POSITION_SWAP);
    }
 
    return profit;
 }
 
 //==================================================================
-// CLOSE ALL
+// CLOSE ALL EA POSITIONS
 //==================================================================
 
 bool CloseAll(string reason)
 {
-   Print(
-      "CRT AI BOT closing basket: ",
-      reason
-   );
-
-   closingBasket = true;
-
    bool allClosed = true;
 
-   string s = Sym();
-
-   for(
-      int i = PositionsTotal() - 1;
-      i >= 0;
-      i--
-   )
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket =
          PositionGetTicket(i);
@@ -413,40 +308,27 @@ bool CloseAll(string reason)
       if(!PositionSelectByTicket(ticket))
          continue;
 
-      if(
-         PositionGetString(
-            POSITION_SYMBOL
-         ) != s
-      )
-      {
-         continue;
-      }
+      string symbol =
+         PositionGetString(POSITION_SYMBOL);
 
-      if(
-         (ulong)PositionGetInteger(
-            POSITION_MAGIC
-         ) != MagicNumber
-      )
-      {
-         continue;
-      }
+      long magic =
+         PositionGetInteger(POSITION_MAGIC);
 
-      if(
-         !trade.PositionClose(ticket)
-      )
+      if(symbol != Sym())
+         continue;
+
+      if((ulong)magic != MagicNumber)
+         continue;
+
+      if(!trade.PositionClose(
+            ticket,
+            SlippagePoints))
       {
          allClosed = false;
-
-         Print(
-            "Close failed #",
-            ticket,
-            " ",
-            trade.ResultRetcodeDescription()
-         );
       }
    }
 
-   if(CountPositions() == 0)
+   if(allClosed)
    {
       protectionActive = false;
       peakPrice = 0.0;
@@ -468,9 +350,12 @@ void UpdateDay()
       tm
    );
 
-   if(savedDay != tm.day)
+   int currentDay =
+      tm.day_of_year;
+
+   if(savedDay != currentDay)
    {
-      savedDay = tm.day;
+      savedDay = currentDay;
 
       dayStartEquity =
          AccountInfoDouble(
@@ -488,42 +373,11 @@ void UpdateDay()
 }
 
 //==================================================================
-// STATUS
-//==================================================================
-
-void UpdateStatus()
-{
-   if(ObjectFind(0,STATUS_LABEL) < 0)
-      return;
-
-   string status;
-
-   if(tradingLocked)
-      status = "LOCKED";
-   else if(tradingEnabled)
-      status = "RUNNING";
-   else
-      status = "STOPPED";
-
-   ObjectSetString(
-      0,
-      STATUS_LABEL,
-      OBJPROP_TEXT,
-      "CRT AI BOT: " + status
-   );
-}
-
-//==================================================================
 // RISK CHECK
 //==================================================================
 
 bool RiskOK()
 {
-   UpdateDay();
-
-   if(tradingLocked)
-      return false;
-
    double equity =
       AccountInfoDouble(
          ACCOUNT_EQUITY
@@ -534,90 +388,42 @@ bool RiskOK()
          ACCOUNT_BALANCE
       );
 
-   //--------------------------------------------------------------
-   // DAILY LOSS
-   //--------------------------------------------------------------
+   if(balance <= 0.0)
+      return false;
 
-   if(
-      DailyLossLimitPercent > 0 &&
-      dayStartEquity > 0
-   )
-   {
-      double lossPercent =
-         (
-            dayStartEquity - equity
-         )
-         /
-         dayStartEquity
-         *
-         100.0;
+   if(dayStartEquity <= 0.0)
+      dayStartEquity = equity;
 
-      if(
-         lossPercent >=
-         DailyLossLimitPercent
-      )
-      {
-         tradingLocked = true;
+   double dailyLoss =
+      dayStartEquity - equity;
 
-         CloseAll(
-            "DAILY LOSS LIMIT"
-         );
+   double dailyLossPercent =
+      (dailyLoss / dayStartEquity) * 100.0;
 
-         UpdateStatus();
-
-         return false;
-      }
-   }
-
-   //--------------------------------------------------------------
-   // DRAWDOWN
-   //--------------------------------------------------------------
-
-   if(
-      MaximumDrawdownPercent > 0 &&
-      balance > 0
-   )
-   {
-      double drawdown =
-         (
-            balance - equity
-         )
-         /
-         balance
-         *
-         100.0;
-
-      if(
-         drawdown >=
-         MaximumDrawdownPercent
-      )
-      {
-         tradingLocked = true;
-
-         CloseAll(
-            "MAXIMUM DRAWDOWN"
-         );
-
-         UpdateStatus();
-
-         return false;
-      }
-   }
-
-   //--------------------------------------------------------------
-   // CONSECUTIVE LOSSES
-   //--------------------------------------------------------------
-
-   if(
-      MaximumConsecutiveLosses > 0 &&
-      consecutiveLosses >=
-      MaximumConsecutiveLosses
-   )
+   if(dailyLossPercent >=
+      DailyLossLimitPercent)
    {
       tradingLocked = true;
+      return false;
+   }
 
-      UpdateStatus();
+   double drawdown =
+      balance - equity;
 
+   double drawdownPercent =
+      (drawdown / balance) * 100.0;
+
+   if(drawdownPercent >=
+      MaximumDrawdownPercent)
+   {
+      tradingLocked = true;
+      return false;
+   }
+
+   if(consecutiveLosses >=
+      MaximumConsecutiveLosses)
+   {
+      tradingLocked = true;
       return false;
    }
 
@@ -625,84 +431,57 @@ bool RiskOK()
 }
 
 //==================================================================
-// CURRENT FORMING M1 CANDLE
+// CURRENT FORMING M1 CANDLE DIRECTION
 //==================================================================
 
 int CurrentCandleDirection()
 {
-   string s = Sym();
+   MqlRates rates[1];
 
-   MqlRates rates[];
-
-   ArraySetAsSeries(
-      rates,
-      true
-   );
-
-   if(
-      CopyRates(
-         s,
+   if(CopyRates(
+         Sym(),
          PERIOD_M1,
          0,
          1,
-         rates
-      ) < 1
-   )
+         rates) != 1)
    {
       return 0;
    }
 
-   // IMPORTANT:
-   // rates[0] is the CURRENT FORMING M1 candle.
-   // No candle-close waiting.
+   double open =
+      rates[0].open;
 
-   if(
-      rates[0].close >
-      rates[0].open
-   )
-   {
+   double current =
+      rates[0].close;
+
+   if(current > open)
       return 1;
-   }
 
-   if(
-      rates[0].close <
-      rates[0].open
-   )
-   {
+   if(current < open)
       return -1;
-   }
 
    return 0;
 }
 
 //==================================================================
-// AUTOMATIC POSITION CALCULATION
+// AUTOMATIC POSITION LIMIT
 //==================================================================
 
 int CalculateAutomaticPositionLimit(
    bool buy,
-   double volume
-)
+   double volume)
 {
-   if(volume <= 0)
-      return 0;
-
-   string s = Sym();
-
    double balance =
       AccountInfoDouble(
          ACCOUNT_BALANCE
       );
 
-   if(balance <= 0)
-      return 0;
-
-   double allowedMargin =
+   double maximumMargin =
       balance *
       MaximumBalanceMarginPercent /
       100.0;
 
-   if(allowedMargin <= 0)
+   if(maximumMargin <= 0.0)
       return 0;
 
    double price;
@@ -711,7 +490,7 @@ int CalculateAutomaticPositionLimit(
    {
       price =
          SymbolInfoDouble(
-            s,
+            Sym(),
             SYMBOL_ASK
          );
    }
@@ -719,56 +498,29 @@ int CalculateAutomaticPositionLimit(
    {
       price =
          SymbolInfoDouble(
-            s,
+            Sym(),
             SYMBOL_BID
          );
    }
 
-   if(price <= 0)
-      return 0;
+   double oneLotMargin = 0.0;
 
-   double marginOne =
-      0.0;
-
-   ENUM_ORDER_TYPE orderType;
-
-   if(buy)
-      orderType = ORDER_TYPE_BUY;
-   else
-      orderType = ORDER_TYPE_SELL;
-
-   if(
-      !OrderCalcMargin(
-         orderType,
-         s,
+   if(!OrderCalcMargin(
+         buy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL,
+         Sym(),
          volume,
          price,
-         marginOne
-      )
-   )
+         oneLotMargin))
    {
-      Print(
-         "OrderCalcMargin failed. Error=",
-         GetLastError()
-      );
-
-      return 0;
+      return 1;
    }
 
-   if(marginOne <= 0)
-      return 0;
-
-   //--------------------------------------------------------------
-   // Calculate margin currently used by this EA.
-   //--------------------------------------------------------------
+   if(oneLotMargin <= 0.0)
+      return 1;
 
    double existingMargin = 0.0;
 
-   for(
-      int i = PositionsTotal() - 1;
-      i >= 0;
-      i--
-   )
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket =
          PositionGetTicket(i);
@@ -779,224 +531,99 @@ int CalculateAutomaticPositionLimit(
       if(!PositionSelectByTicket(ticket))
          continue;
 
-      if(
-         PositionGetString(
-            POSITION_SYMBOL
-         ) != s
-      )
-      {
-         continue;
-      }
+      string symbol =
+         PositionGetString(POSITION_SYMBOL);
 
-      if(
-         (ulong)PositionGetInteger(
-            POSITION_MAGIC
-         ) != MagicNumber
-      )
-      {
-         continue;
-      }
+      long magic =
+         PositionGetInteger(POSITION_MAGIC);
 
-      long type =
-         PositionGetInteger(
-            POSITION_TYPE
-         );
+      if(symbol != Sym())
+         continue;
+
+      if((ulong)magic != MagicNumber)
+         continue;
 
       double posVolume =
          PositionGetDouble(
             POSITION_VOLUME
          );
 
-      ENUM_ORDER_TYPE posOrder;
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)
+         PositionGetInteger(
+            POSITION_TYPE
+         );
+
+      ENUM_ORDER_TYPE orderType;
 
       if(type == POSITION_TYPE_BUY)
-         posOrder = ORDER_TYPE_BUY;
+         orderType = ORDER_TYPE_BUY;
       else
-         posOrder = ORDER_TYPE_SELL;
+         orderType = ORDER_TYPE_SELL;
 
-      double posPrice;
-
-      if(type == POSITION_TYPE_BUY)
-      {
-         posPrice =
-            SymbolInfoDouble(
-               s,
-               SYMBOL_ASK
-            );
-      }
-      else
-      {
-         posPrice =
-            SymbolInfoDouble(
-               s,
-               SYMBOL_BID
-            );
-      }
+      double posPrice =
+         PositionGetDouble(
+            POSITION_PRICE_OPEN
+         );
 
       double posMargin = 0.0;
 
-      if(
-         OrderCalcMargin(
-            posOrder,
-            s,
+      if(OrderCalcMargin(
+            orderType,
+            Sym(),
             posVolume,
             posPrice,
-            posMargin
-         )
-      )
+            posMargin))
       {
          existingMargin += posMargin;
       }
    }
 
    double remainingMargin =
-      allowedMargin -
+      maximumMargin -
       existingMargin;
 
-   if(remainingMargin <= 0)
+   if(remainingMargin < oneLotMargin)
       return 0;
 
    int possible =
       (int)MathFloor(
          remainingMargin /
-         marginOne
+         oneLotMargin
       );
 
-   //--------------------------------------------------------------
-   // Apply maximum EA lot exposure.
-   //--------------------------------------------------------------
+   if(possible < 0)
+      possible = 0;
 
-   if(MaximumEAExposureLots > 0)
+   if(MaximumOpenPositions > 0)
    {
-      double existingLots =
-         TotalLots();
+      int remainingPositions =
+         MaximumOpenPositions -
+         CountPositions();
 
-      double remainingLots =
-         MaximumEAExposureLots -
-         existingLots;
-
-      if(remainingLots <= 0)
-         return 0;
-
-      int byLots =
-         (int)MathFloor(
-            remainingLots /
-            volume
-         );
-
-      possible =
-         MathMin(
-            possible,
-            byLots
-         );
+      if(remainingPositions < possible)
+         possible = remainingPositions;
    }
 
-   return MathMax(
-      possible,
-      0
-   );
+   if(OrdersPerSignal > 0 &&
+      OrdersPerSignal < possible)
+   {
+      possible = OrdersPerSignal;
+   }
+
+   return possible;
 }
 
 //==================================================================
-// OPEN ONE
+// OPEN ONE TRADE
 //==================================================================
 
 bool OpenOne(
    bool buy,
-   double volume
-)
+   double volume)
 {
-   string s = Sym();
-
-   double ask =
-      SymbolInfoDouble(
-         s,
-         SYMBOL_ASK
-      );
-
-   double bid =
-      SymbolInfoDouble(
-         s,
-         SYMBOL_BID
-      );
-
-   double pip =
-      PipSize(s);
-
-   int digits =
-      (int)SymbolInfoInteger(
-         s,
-         SYMBOL_DIGITS
-      );
-
-   if(
-      ask <= 0 ||
-      bid <= 0
-   )
-   {
+   if(volume <= 0.0)
       return false;
-   }
-
-   double sl = 0;
-   double tp = 0;
-
-   //--------------------------------------------------------------
-   // SL
-   //--------------------------------------------------------------
-
-   if(
-      StopLossPips > 0 &&
-      pip > 0
-   )
-   {
-      if(buy)
-      {
-         sl =
-            NormalizeDouble(
-               ask -
-               StopLossPips * pip,
-               digits
-            );
-      }
-      else
-      {
-         sl =
-            NormalizeDouble(
-               bid +
-               StopLossPips * pip,
-               digits
-            );
-      }
-   }
-
-   //--------------------------------------------------------------
-   // TP
-   //--------------------------------------------------------------
-
-   if(
-      TakeProfitPips > 0 &&
-      pip > 0
-   )
-   {
-      if(buy)
-      {
-         tp =
-            NormalizeDouble(
-               ask +
-               TakeProfitPips * pip,
-               digits
-            );
-      }
-      else
-      {
-         tp =
-            NormalizeDouble(
-               bid -
-               TakeProfitPips * pip,
-               digits
-            );
-      }
-   }
 
    trade.SetExpertMagicNumber(
       MagicNumber
@@ -1006,18 +633,21 @@ bool OpenOne(
       SlippagePoints
    );
 
-   bool result = false;
+   string comment =
+      "CRT AI BOT";
+
+   bool result;
 
    if(buy)
    {
       result =
          trade.Buy(
             volume,
-            s,
-            0,
-            sl,
-            tp,
-            "CRT M1 FLIP BUY"
+            Sym(),
+            0.0,
+            0.0,
+            0.0,
+            comment
          );
    }
    else
@@ -1025,186 +655,81 @@ bool OpenOne(
       result =
          trade.Sell(
             volume,
-            s,
-            0,
-            sl,
-            tp,
-            "CRT M1 FLIP SELL"
+            Sym(),
+            0.0,
+            0.0,
+            0.0,
+            comment
          );
    }
 
-   if(!result)
-   {
-      Print(
-         "Order failed: ",
-         trade.ResultRetcode(),
-         " ",
-         trade.ResultRetcodeDescription()
-      );
-
-      return false;
-   }
-
-   Print(
-      "CRT AI BOT OPENED ",
-      buy ? "BUY" : "SELL",
-      " | Lot=",
-      DoubleToString(
-         volume,
-         2
-      )
-   );
-
-   return true;
+   return result;
 }//==================================================================
-// OPEN CURRENT DIRECTION
+// OPEN CURRENT CANDLE DIRECTION
 //==================================================================
 
-void OpenCurrentDirection(
-   int direction
-)
+void OpenCurrentDirection(int direction)
 {
-   if(direction == 0)
-      return;
-
    if(!tradingEnabled)
       return;
 
    if(tradingLocked)
       return;
 
-   if(!RiskOK())
+   if(direction == 0)
       return;
 
-   string s = Sym();
-
-   if(!SymbolSelect(s,true))
-   {
-      Print(
-         "Cannot select symbol ",
-         s
-      );
-
+   if(CountPositions() > 0)
       return;
-   }
-
-   //--------------------------------------------------------------
-   // CALCULATE DYNAMIC LOT
-   //--------------------------------------------------------------
 
    double volume =
       CalculateDynamicLot();
 
-   if(volume <= 0)
-   {
-      Print(
-         "Dynamic lot calculation returned 0."
+   if(volume <= 0.0)
+      return;
+
+   // Never allow total EA exposure above the configured maximum.
+   if(volume > MaximumEAExposureLots)
+      volume = MaximumEAExposureLots;
+
+   volume =
+      NormalizeVolume(
+         Sym(),
+         volume
       );
 
-      return;
-   }
-
    bool buy =
-      direction == 1;
+      (direction > 0);
 
-   //--------------------------------------------------------------
-   // AUTOMATIC POSITION CAP
-   //--------------------------------------------------------------
-
-   int automaticLimit =
+   int numberToOpen =
       CalculateAutomaticPositionLimit(
          buy,
          volume
       );
 
-   if(automaticLimit <= 0)
-   {
-      Print(
-         "No available position within the ",
-         DoubleToString(
-            MaximumBalanceMarginPercent,
-            1
-         ),
-         "% balance margin allocation."
-      );
-
+   if(numberToOpen <= 0)
       return;
-   }
 
-   //--------------------------------------------------------------
-   // CURRENT POSITIONS
-   //--------------------------------------------------------------
-
-   int currentPositions =
-      CountPositions();
-
-   //--------------------------------------------------------------
-   // MAXIMUM POSITION LIMIT
-   //--------------------------------------------------------------
-
-   int maximumPositions =
-      automaticLimit;
-
-   if(MaximumOpenPositions > 0)
+   if(MaximumEAExposureLots > 0.0)
    {
-      maximumPositions =
-         MathMin(
-            MaximumOpenPositions,
-            automaticLimit
+      double maxAdditional =
+         MaximumEAExposureLots -
+         TotalLots();
+
+      int maxByExposure =
+         (int)MathFloor(
+            maxAdditional / volume
          );
+
+      if(maxByExposure < numberToOpen)
+         numberToOpen =
+            maxByExposure;
    }
 
-   if(
-      currentPositions >=
-      maximumPositions
-   )
-   {
-      return;
-   }
-
-   //--------------------------------------------------------------
-   // AVAILABLE SLOTS
-   //--------------------------------------------------------------
-
-   int availableSlots =
-      maximumPositions -
-      currentPositions;
-
-   //--------------------------------------------------------------
-   // ORDERS PER SIGNAL
-   //
-   // 0 = fill all available slots.
-   //--------------------------------------------------------------
-
-   int orders;
-
-   if(OrdersPerSignal <= 0)
-   {
-      orders = availableSlots;
-   }
-   else
-   {
-      orders =
-         MathMin(
-            OrdersPerSignal,
-            availableSlots
-         );
-   }
-
-   if(orders <= 0)
+   if(numberToOpen <= 0)
       return;
 
-   //--------------------------------------------------------------
-   // OPEN POSITIONS
-   //--------------------------------------------------------------
-
-   int successfulOrders = 0;
-
-   for(
-      int i = 0;
-      i < orders;
-      i++
-   )
+   for(int i = 0; i < numberToOpen; i++)
    {
       if(!tradingEnabled)
          break;
@@ -1212,83 +737,36 @@ void OpenCurrentDirection(
       if(tradingLocked)
          break;
 
-      if(!RiskOK())
-         break;
-
-      //-----------------------------------------------------------
-      // Recalculate remaining capacity before each order.
-      //-----------------------------------------------------------
-
-      int remainingCapacity =
-         CalculateAutomaticPositionLimit(
-            buy,
-            volume
-         );
-
-      if(remainingCapacity <= 0)
+      if(TotalLots() + volume >
+         MaximumEAExposureLots + 0.0000001)
       {
-         Print(
-            "50% balance margin allocation reached."
-         );
-
          break;
       }
 
-      //-----------------------------------------------------------
-      // Maximum EA exposure
-      //-----------------------------------------------------------
-
-      if(
-         MaximumEAExposureLots > 0 &&
-         TotalLots() +
-         volume >
-         MaximumEAExposureLots +
-         1e-9
-      )
+      if(!OpenOne(buy,volume))
       {
          Print(
-            "Maximum EA exposure reached."
+            "CRT AI BOT: Trade open failed. Error = ",
+            GetLastError()
          );
 
          break;
-      }
-
-      //-----------------------------------------------------------
-      // OPEN
-      //-----------------------------------------------------------
-
-      if(
-         OpenOne(
-            buy,
-            volume
-         )
-      )
-      {
-         successfulOrders++;
       }
    }
 
-   if(successfulOrders > 0)
-   {
-      //-----------------------------------------------------------
-      // Start profit protection from the current market price.
-      //-----------------------------------------------------------
-
-      protectionActive = false;
-      peakPrice = 0.0;
-
-      Print(
-         "CRT AI BOT opened ",
-         successfulOrders,
-         " ",
-         buy ? "BUY" : "SELL",
-         " positions."
-      );
-   }
+   // Reset profit-protection tracking for the new basket.
+   protectionActive = false;
+   peakPrice = 0.0;
 }
 
 //==================================================================
-// MANAGE PROFIT PROTECTION
+// PROFIT PROTECTION
+//
+// IMPORTANT:
+// 1. Losing baskets are NEVER closed here.
+// 2. Protection starts only after basket profit reaches the minimum.
+// 3. Once active, the favorable price peak is tracked.
+// 4. Basket closes only after a 2-pip retracement from that peak.
 //==================================================================
 
 void ManageProfitProtection()
@@ -1299,31 +777,49 @@ void ManageProfitProtection()
    if(tradingLocked)
       return;
 
-   if(closingBasket)
-      return;
+   int positions =
+      CountPositions();
 
-   if(CountPositions() <= 0)
+   if(positions <= 0)
    {
       protectionActive = false;
       peakPrice = 0.0;
-
       return;
    }
 
-   string s = Sym();
+   double profit =
+      BasketProfit();
 
-   //--------------------------------------------------------------
-   // Determine the basket direction.
-   //--------------------------------------------------------------
+   //==============================================================
+   // ABSOLUTE RULE:
+   // NEVER CLOSE A LOSING BASKET.
+   //==============================================================
 
-   bool basketBuy = false;
-   bool basketSell = false;
+   if(profit < MinimumProfitToProtect)
+   {
+      protectionActive = false;
+      peakPrice = 0.0;
+      return;
+   }
 
-   for(
-      int i = PositionsTotal() - 1;
-      i >= 0;
-      i--
-   )
+   string symbol =
+      Sym();
+
+   double pip =
+      PipSize(symbol);
+
+   if(pip <= 0.0)
+      return;
+
+   //==============================================================
+   // Determine whether the basket is BUY or SELL.
+   // The EA opens one direction per basket.
+   //==============================================================
+
+   bool haveBuy = false;
+   bool haveSell = false;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket =
          PositionGetTicket(i);
@@ -1334,285 +830,158 @@ void ManageProfitProtection()
       if(!PositionSelectByTicket(ticket))
          continue;
 
-      if(
+      string posSymbol =
          PositionGetString(
             POSITION_SYMBOL
-         ) != s
-      )
-      {
-         continue;
-      }
+         );
 
-      if(
-         (ulong)PositionGetInteger(
+      long magic =
+         PositionGetInteger(
             POSITION_MAGIC
-         ) != MagicNumber
-      )
-      {
-         continue;
-      }
+         );
 
-      long type =
+      if(posSymbol != symbol)
+         continue;
+
+      if((ulong)magic != MagicNumber)
+         continue;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)
          PositionGetInteger(
             POSITION_TYPE
          );
 
       if(type == POSITION_TYPE_BUY)
-         basketBuy = true;
+         haveBuy = true;
 
       if(type == POSITION_TYPE_SELL)
-         basketSell = true;
+         haveSell = true;
    }
 
-   //--------------------------------------------------------------
-   // Mixed-direction basket.
-   //--------------------------------------------------------------
+   //==============================================================
+   // Activate protection only after minimum profit is reached.
+   //==============================================================
 
-   if(
-      basketBuy &&
-      basketSell
-   )
+   if(!protectionActive)
    {
-      protectionActive = false;
-      peakPrice = 0.0;
+      protectionActive = true;
 
-      return;
-   }
-
-   //--------------------------------------------------------------
-   // Basket must have a direction.
-   //--------------------------------------------------------------
-
-   if(
-      !basketBuy &&
-      !basketSell
-   )
-   {
-      protectionActive = false;
-      peakPrice = 0.0;
-
-      return;
-   }
-
-   //--------------------------------------------------------------
-   // Basket profit.
-   //--------------------------------------------------------------
-
-   double profit =
-      BasketProfit();
-
-   //--------------------------------------------------------------
-   // Protection only activates once the basket is profitable.
-   //--------------------------------------------------------------
-
-   if(
-      profit <
-      MinimumProfitToProtect
-   )
-   {
-      return;
-   }
-
-   double pip =
-      PipSize(s);
-
-   if(pip <= 0)
-      return;
-
-   //--------------------------------------------------------------
-   // BUY BASKET
-   //
-   // Track the highest BID reached after profit protection
-   // becomes active.
-   //--------------------------------------------------------------
-
-   if(basketBuy)
-   {
-      double bid =
-         SymbolInfoDouble(
-            s,
-            SYMBOL_BID
-         );
-
-      if(bid <= 0)
-         return;
-
-      if(!protectionActive)
+      if(haveBuy && !haveSell)
       {
-         protectionActive = true;
-         peakPrice = bid;
-
-         Print(
-            "Profit protection ACTIVATED for BUY basket."
-         );
-
+         peakPrice =
+            SymbolInfoDouble(
+               symbol,
+               SYMBOL_BID
+            );
+      }
+      else if(haveSell && !haveBuy)
+      {
+         peakPrice =
+            SymbolInfoDouble(
+               symbol,
+               SYMBOL_ASK
+            );
+      }
+      else
+      {
+         protectionActive = false;
+         peakPrice = 0.0;
          return;
       }
 
-      //-----------------------------------------------------------
-      // New favorable peak.
-      //-----------------------------------------------------------
+      return;
+   }
+
+   //==============================================================
+   // BUY BASKET
+   // Track the highest BID reached.
+   //==============================================================
+
+   if(haveBuy && !haveSell)
+   {
+      double bid =
+         SymbolInfoDouble(
+            symbol,
+            SYMBOL_BID
+         );
 
       if(bid > peakPrice)
       {
          peakPrice = bid;
-      }
-
-      //-----------------------------------------------------------
-      // 2 PIP RETRACEMENT
-      //-----------------------------------------------------------
-
-      double retracement =
-         peakPrice -
-         bid;
-
-      if(
-         retracement >=
-         ProfitRetracementPips * pip
-      )
-      {
-         Print(
-            "2 PIP PROFIT RETRACEMENT detected on BUY basket."
-         );
-
-         bool closed =
-            CloseAll(
-               "2 PIP PROFIT RETRACEMENT"
-            );
-
-         if(closed)
-         {
-            protectionActive = false;
-            peakPrice = 0.0;
-            closingBasket = false;
-
-            //-----------------------------------------------------
-            // IMMEDIATE RE-ENTRY.
-            //
-            // Uses CURRENT forming M1 candle.
-            // Does NOT wait for candle close.
-            //-----------------------------------------------------
-
-            if(
-               tradingEnabled &&
-               !tradingLocked &&
-               CountPositions() == 0
-            )
-            {
-               int direction =
-                  CurrentCandleDirection();
-
-               if(direction != 0)
-               {
-                  OpenCurrentDirection(
-                     direction
-                  );
-               }
-            }
-         }
-
          return;
       }
+
+      double retracement =
+         peakPrice - bid;
+
+      // Close ONLY after price retraces the configured amount
+      // from the favorable peak.
+      if(retracement >=
+         ProfitRetracementPips * pip)
+      {
+         // Final safety check:
+         // Do not close unless basket is still profitable.
+         if(BasketProfit() >=
+            MinimumProfitToProtect)
+         {
+            CloseAll(
+               "BUY profit retracement"
+            );
+         }
+      }
+
+      return;
    }
 
-   //--------------------------------------------------------------
+   //==============================================================
    // SELL BASKET
-   //
-   // Track the lowest ASK reached after profit protection
-   // becomes active.
-   //--------------------------------------------------------------
+   // Track the lowest ASK reached.
+   //==============================================================
 
-   if(basketSell)
+   if(haveSell && !haveBuy)
    {
       double ask =
          SymbolInfoDouble(
-            s,
+            symbol,
             SYMBOL_ASK
          );
 
-      if(ask <= 0)
-         return;
-
-      if(!protectionActive)
-      {
-         protectionActive = true;
-         peakPrice = ask;
-
-         Print(
-            "Profit protection ACTIVATED for SELL basket."
-         );
-
-         return;
-      }
-
-      //-----------------------------------------------------------
-      // New favorable peak for SELL = lower price.
-      //-----------------------------------------------------------
-
-      if(ask < peakPrice)
+      if(peakPrice == 0.0 ||
+         ask < peakPrice)
       {
          peakPrice = ask;
+         return;
       }
-
-      //-----------------------------------------------------------
-      // 2 PIP RETRACEMENT
-      //-----------------------------------------------------------
 
       double retracement =
-         ask -
-         peakPrice;
+         ask - peakPrice;
 
-      if(
-         retracement >=
-         ProfitRetracementPips * pip
-      )
+      // Close ONLY after price retraces the configured amount
+      // from the favorable peak.
+      if(retracement >=
+         ProfitRetracementPips * pip)
       {
-         Print(
-            "2 PIP PROFIT RETRACEMENT detected on SELL basket."
-         );
-
-         bool closed =
-            CloseAll(
-               "2 PIP PROFIT RETRACEMENT"
-            );
-
-         if(closed)
+         // Final safety check:
+         // Do not close unless basket is still profitable.
+         if(BasketProfit() >=
+            MinimumProfitToProtect)
          {
-            protectionActive = false;
-            peakPrice = 0.0;
-            closingBasket = false;
-
-            //-----------------------------------------------------
-            // IMMEDIATE RE-ENTRY.
-            //
-            // Uses CURRENT forming M1 candle.
-            //-----------------------------------------------------
-
-            if(
-               tradingEnabled &&
-               !tradingLocked &&
-               CountPositions() == 0
-            )
-            {
-               int direction =
-                  CurrentCandleDirection();
-
-               if(direction != 0)
-               {
-                  OpenCurrentDirection(
-                     direction
-                  );
-               }
-            }
+            CloseAll(
+               "SELL profit retracement"
+            );
          }
-
-         return;
       }
+
+      return;
    }
 }
 
 //==================================================================
-// MANAGE FLIPPING
+// MANAGE CURRENT BASKET
+//
+// There is NO candle-reversal closing here.
+// The basket stays open until profit protection closes it.
 //==================================================================
 
 void ManageFlipping()
@@ -1623,16 +992,11 @@ void ManageFlipping()
    if(tradingLocked)
       return;
 
-   if(closingBasket)
-      return;
-
-   //--------------------------------------------------------------
-   // If there are no positions, immediately use the current
-   // forming M1 candle.
-   //--------------------------------------------------------------
-
    if(CountPositions() == 0)
    {
+      protectionActive = false;
+      peakPrice = 0.0;
+
       int direction =
          CurrentCandleDirection();
 
@@ -1646,12 +1010,6 @@ void ManageFlipping()
       return;
    }
 
-   //--------------------------------------------------------------
-   // Profit protection is checked on EVERY incoming tick.
-   //
-   // Therefore there is NO candle-close waiting.
-   //--------------------------------------------------------------
-
    ManageProfitProtection();
 }
 
@@ -1663,14 +1021,17 @@ void CreateButton(
    string name,
    string text,
    int x,
-   int y
-)
+   int y)
 {
-   if(ObjectFind(0,name) >= 0)
+   if(ObjectFind(
+         0,
+         name) >= 0)
+   {
       ObjectDelete(
          0,
          name
       );
+   }
 
    ObjectCreate(
       0,
@@ -1679,13 +1040,6 @@ void CreateButton(
       0,
       0,
       0
-   );
-
-   ObjectSetInteger(
-      0,
-      name,
-      OBJPROP_CORNER,
-      CORNER_LEFT_UPPER
    );
 
    ObjectSetInteger(
@@ -1706,7 +1060,7 @@ void CreateButton(
       0,
       name,
       OBJPROP_XSIZE,
-      80
+      100
    );
 
    ObjectSetInteger(
@@ -1726,8 +1080,86 @@ void CreateButton(
    ObjectSetInteger(
       0,
       name,
-      OBJPROP_FONTSIZE,
-      10
+      OBJPROP_SELECTABLE,
+      false
+   );
+
+   ObjectSetInteger(
+      0,
+      name,
+      OBJPROP_HIDDEN,
+      false
+   );
+}
+
+//==================================================================
+// STATUS
+//==================================================================
+
+void UpdateStatus()
+{
+   string status;
+
+   if(tradingLocked)
+      status = "CRT AI BOT: LOCKED";
+   else if(tradingEnabled)
+      status = "CRT AI BOT: RUNNING";
+   else
+      status = "CRT AI BOT: STOPPED";
+
+   status +=
+      "\nPositions: " +
+      IntegerToString(
+         CountPositions()
+      );
+
+   status +=
+      "\nBasket Profit: " +
+      DoubleToString(
+         BasketProfit(),
+         2
+      );
+
+   if(protectionActive)
+      status +=
+         "\nProtection: ACTIVE";
+   else
+      status +=
+         "\nProtection: WAITING FOR PROFIT";
+
+   if(ObjectFind(
+         0,
+         STATUS_LABEL) < 0)
+   {
+      ObjectCreate(
+         0,
+         STATUS_LABEL,
+         OBJ_LABEL,
+         0,
+         0,
+         0
+      );
+
+      ObjectSetInteger(
+         0,
+         STATUS_LABEL,
+         OBJPROP_XDISTANCE,
+         10
+      );
+
+      ObjectSetInteger(
+         0,
+         STATUS_LABEL,
+         OBJPROP_YDISTANCE,
+         80
+      );
+   }
+
+   ObjectSetString(
+      0,
+      STATUS_LABEL,
+      OBJPROP_TEXT,
+      status
    );
 }
 
@@ -1737,16 +1169,6 @@ void CreateButton(
 
 int OnInit()
 {
-   if(!SymbolSelect(Sym(),true))
-   {
-      Print(
-         "Cannot select symbol ",
-         Sym()
-      );
-
-      return INIT_FAILED;
-   }
-
    trade.SetExpertMagicNumber(
       MagicNumber
    );
@@ -1767,113 +1189,14 @@ int OnInit()
    CreateButton(
       STOP_BUTTON,
       "STOP",
-      100,
+      120,
       20
    );
 
-   if(ObjectFind(0,STATUS_LABEL) >= 0)
-      ObjectDelete(
-         0,
-         STATUS_LABEL
-      );
-
-   ObjectCreate(
-      0,
-      STATUS_LABEL,
-      OBJ_LABEL,
-      0,
-      0,
-      0
-   );
-
-   ObjectSetInteger(
-      0,
-      STATUS_LABEL,
-      OBJPROP_CORNER,
-      CORNER_LEFT_UPPER
-   );
-
-   ObjectSetInteger(
-      0,
-      STATUS_LABEL,
-      OBJPROP_XDISTANCE,
-      10
-   );
-
-   ObjectSetInteger(
-      0,
-      STATUS_LABEL,
-      OBJPROP_YDISTANCE,
-      60
-   );
-
-   ObjectSetString(
-      0,
-      STATUS_LABEL,
-      OBJPROP_TEXT,
-      "CRT AI BOT: STOPPED"
-   );
-
-   ObjectSetInteger(
-      0,
-      STATUS_LABEL,
-      OBJPROP_FONTSIZE,
-      10
-   );
+   UpdateStatus();
 
    Print(
-      "=========================================="
-   );
-
-   Print(
-      "CRT AI BOT v7.10"
-   );
-
-   Print(
-      "M1 REAL-TIME FLIPPING ROBOT"
-   );
-
-   Print(
-      "Symbol: ",
-      Sym()
-   );
-
-   Print(
-      "Lot multiplier: ",
-      DoubleToString(
-         LotMultiplier,
-         4
-      )
-   );
-
-   Print(
-      "Automatic margin allocation: ",
-      DoubleToString(
-         MaximumBalanceMarginPercent,
-         1
-      ),
-      "%"
-   );
-
-   Print(
-      "Profit retracement: ",
-      DoubleToString(
-         ProfitRetracementPips,
-         1
-      ),
-      " pips"
-   );
-
-   Print(
-      "Immediate re-entry: ENABLED"
-   );
-
-   Print(
-      "Candle: CURRENT FORMING M1"
-   );
-
-   Print(
-      "=========================================="
+      "CRT AI BOT initialized successfully."
    );
 
    return INIT_SUCCEEDED;
@@ -1884,8 +1207,7 @@ int OnInit()
 //==================================================================
 
 void OnDeinit(
-   const int reason
-)
+   const int reason)
 {
    ObjectDelete(
       0,
@@ -1900,16 +1222,18 @@ void OnDeinit(
    ObjectDelete(
       0,
       STATUS_LABEL
-   );
-}
-
-//==================================================================
-// MAIN TICK
+   )//==================================================================
+// ON TICK
+//
+// This runs on every incoming market tick.
+// There is NO waiting for M1 candle close.
 //==================================================================
 
 void OnTick()
 {
    UpdateDay();
+
+   UpdateStatus();
 
    if(!tradingEnabled)
       return;
@@ -1921,18 +1245,14 @@ void OnTick()
       return;
 
    //==============================================================
-   // AUTOMATIC RE-ENTRY
-   // If the previous basket has completely closed,
-   // immediately allow a new basket.
+   // NO OPEN POSITIONS
    //
-   // IMPORTANT:
-   // CurrentCandleDirection() uses the CURRENT FORMING M1 candle.
-   // There is NO waiting for the candle to close.
+   // Immediately use the CURRENT FORMING M1 candle.
+   // No candle-close confirmation.
    //==============================================================
 
    if(CountPositions() == 0)
    {
-      closingBasket = false;
       protectionActive = false;
       peakPrice = 0.0;
 
@@ -1950,112 +1270,97 @@ void OnTick()
    }
 
    //==============================================================
-   // MANAGE CURRENT BASKET
+   // OPEN BASKET EXISTS
+   //
+   // Only profit protection is managed.
    //==============================================================
 
-   ManageFlipping();
+   ManageProfitProtection();
+
+   UpdateStatus();
 }
 
 //==================================================================
-// START / STOP BUTTON EVENTS
+// CHART BUTTON EVENTS
 //==================================================================
 
 void OnChartEvent(
    const int id,
    const long &lparam,
    const double &dparam,
-   const string &sparam
-)
+   const string &sparam)
 {
-   if(
-      id !=
-      CHARTEVENT_OBJECT_CLICK
-   )
-   {
+   if(id != CHARTEVENT_OBJECT_CLICK)
       return;
-   }
 
-   //--------------------------------------------------------------
+   //==============================================================
    // START
-   //--------------------------------------------------------------
+   //==============================================================
 
-   if(
-      sparam ==
-      START_BUTTON
-   )
+   if(sparam == START_BUTTON)
    {
-      if(tradingLocked)
-      {
-         Print(
-            "START blocked: risk protection is active."
-         );
-
-         return;
-      }
-
       tradingEnabled = true;
-      closingBasket = false;
+      tradingLocked = false;
 
-      UpdateStatus();
+      protectionActive = false;
+      peakPrice = 0.0;
+
+      UpdateDay();
 
       Print(
-         "CRT AI BOT STARTED"
+         "CRT AI BOT STARTED."
       );
 
-      //-----------------------------------------------------------
-      // OPEN IMMEDIATELY USING CURRENT FORMING M1 CANDLE.
-      //-----------------------------------------------------------
-
-      int direction =
-         CurrentCandleDirection();
-
-      if(direction != 0)
+      // Immediately check the current forming M1 candle.
+      if(CountPositions() == 0 &&
+         RiskOK())
       {
-         OpenCurrentDirection(
-            direction
-         );
+         int direction =
+            CurrentCandleDirection();
+
+         if(direction != 0)
+         {
+            OpenCurrentDirection(
+               direction
+            );
+         }
       }
+
+      UpdateStatus();
    }
 
-   //--------------------------------------------------------------
+   //==============================================================
    // STOP
-   //--------------------------------------------------------------
+   //
+   // STOP does not force-close an existing basket.
+   //==============================================================
 
-   if(
-      sparam ==
-      STOP_BUTTON
-   )
+   if(sparam == STOP_BUTTON)
    {
       tradingEnabled = false;
 
-      UpdateStatus();
-
-      CloseAll(
-         "MANUAL STOP"
-      );
-
-      closingBasket = false;
-
       Print(
-         "CRT AI BOT STOPPED"
+         "CRT AI BOT STOPPED."
       );
+
+      UpdateStatus();
    }
 }
 
 //==================================================================
 // TRADE TRANSACTION
+//
+// Tracks completed losing trades.
+// It does NOT automatically close losing baskets.
 //==================================================================
 
 void OnTradeTransaction(
    const MqlTradeTransaction &trans,
    const MqlTradeRequest &request,
-   const MqlTradeResult &result
-)
+   const MqlTradeResult &result)
 {
-   if(
-      trans.type !=
-      TRADE_TRANSACTION_DEAL_ADD
-   )
+   if(trans.type !=
+      TRADE_TRANSACTION_DEAL_ADD)
    {
       return;
    }
@@ -2063,34 +1368,11 @@ void OnTradeTransaction(
    if(trans.deal == 0)
       return;
 
-   if(
-      !HistoryDealSelect(
-         trans.deal
-      )
-   )
+   if(!HistoryDealSelect(
+         trans.deal))
    {
       return;
    }
-
-   long entry =
-      HistoryDealGetInteger(
-         trans.deal,
-         DEAL_ENTRY
-      );
-
-   if(
-      entry != DEAL_ENTRY_OUT &&
-      entry != DEAL_ENTRY_OUT_BY
-   )
-   {
-      return;
-   }
-
-   long magic =
-      HistoryDealGetInteger(
-         trans.deal,
-         DEAL_MAGIC
-      );
 
    string symbol =
       HistoryDealGetString(
@@ -2098,10 +1380,27 @@ void OnTradeTransaction(
          DEAL_SYMBOL
       );
 
-   if(
-      (ulong)magic != MagicNumber ||
-      symbol != Sym()
-   )
+   long magic =
+      HistoryDealGetInteger(
+         trans.deal,
+         DEAL_MAGIC
+      );
+
+   if(symbol != Sym())
+      return;
+
+   if((ulong)magic != MagicNumber)
+      return;
+
+   long entry =
+      HistoryDealGetInteger(
+         trans.deal,
+         DEAL_ENTRY
+      );
+
+   // Only count completed exits.
+   if(entry != DEAL_ENTRY_OUT &&
+      entry != DEAL_ENTRY_OUT_BY)
    {
       return;
    }
@@ -2124,77 +1423,26 @@ void OnTradeTransaction(
          DEAL_COMMISSION
       );
 
-   double netProfit =
+   double netResult =
       profit +
       swap +
       commission;
 
-   //--------------------------------------------------------------
-   // LOSS TRACKING
-   //--------------------------------------------------------------
-
-   if(netProfit < 0)
-   {
+   if(netResult < 0.0)
       consecutiveLosses++;
-   }
-   else if(netProfit > 0)
-   {
+   else if(netResult > 0.0)
       consecutiveLosses = 0;
-   }
 
-   //--------------------------------------------------------------
-   // CONSECUTIVE LOSS PROTECTION
-   //-----------------
-if(
-      MaximumConsecutiveLosses > 0 &&
-      consecutiveLosses >=
-      MaximumConsecutiveLosses
-   )
-   {
-      tradingLocked = true;
-      tradingEnabled = false;
+   //==============================================================
+   // When the basket is completely closed, reset protection.
+   // The next tick immediately checks the current M1 direction.
+   //==============================================================
 
-      CloseAll(
-         "MAXIMUM CONSECUTIVE LOSSES"
-      );
-
-      UpdateStatus();
-
-      Print(
-         "CRT AI BOT LOCKED BY RISK PROTECTION"
-      );
-
-      return;
-   }
-
-   //--------------------------------------------------------------
-   // IMPORTANT:
-   // We do NOT use this transaction event to wait for a candle.
-   //
-   // Re-entry is handled by OnTick() immediately after the basket
-   // is completely closed, using the CURRENT forming M1 candle.
-   //--------------------------------------------------------------
-
-   if(
-      CountPositions() == 0 &&
-      tradingEnabled &&
-      !tradingLocked &&
-      !closingBasket
-   )
+   if(CountPositions() == 0)
    {
       protectionActive = false;
       peakPrice = 0.0;
-
-      int direction =
-         CurrentCandleDirection();
-
-      if(direction != 0)
-      {
-         OpenCurrentDirection(
-            direction
-         );
-      }
    }
-}
 
-//+------------------------------------------------------------------+}
+   UpdateStatus();
+}
