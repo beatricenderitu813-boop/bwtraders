@@ -2117,3 +2117,56 @@ void OnTradeTransaction(
    //--------------------------------------------------------------
    // CONSECUTIVE LOSS PROTECTION
    //-----------------
+if(
+      MaximumConsecutiveLosses > 0 &&
+      consecutiveLosses >=
+      MaximumConsecutiveLosses
+   )
+   {
+      tradingLocked = true;
+      tradingEnabled = false;
+
+      CloseAll(
+         "MAXIMUM CONSECUTIVE LOSSES"
+      );
+
+      UpdateStatus();
+
+      Print(
+         "CRT AI BOT LOCKED BY RISK PROTECTION"
+      );
+
+      return;
+   }
+
+   //--------------------------------------------------------------
+   // IMPORTANT:
+   // We do NOT use this transaction event to wait for a candle.
+   //
+   // Re-entry is handled by OnTick() immediately after the basket
+   // is completely closed, using the CURRENT forming M1 candle.
+   //--------------------------------------------------------------
+
+   if(
+      CountPositions() == 0 &&
+      tradingEnabled &&
+      !tradingLocked &&
+      !closingBasket
+   )
+   {
+      protectionActive = false;
+      peakPrice = 0.0;
+
+      int direction =
+         CurrentCandleDirection();
+
+      if(direction != 0)
+      {
+         OpenCurrentDirection(
+            direction
+         );
+      }
+   }
+}
+
+//+------------------------------------------------------------------+}
