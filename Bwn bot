@@ -1,56 +1,48 @@
 //+------------------------------------------------------------------+
-//|                         BWN BOT                                  |
-//| Current Candle Strength Trading EA                               |
+//|                         BWN BOT V2                               |
+//| Current Forming Candle Trading EA                                |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.00"
-#property description "BWN Bot - current forming candle trading system"
+#property version   "2.00"
 
 #include <Trade/Trade.mqh>
 
 CTrade trade;
 
-//====================================================================
+//==================================================================
 // INPUTS
-//====================================================================
+//==================================================================
 
-//--- Trading timeframe
 input ENUM_TIMEFRAMES TradingTimeframe = PERIOD_M1;
 
-//--- Entry and reversal
 input double EntryStrengthPercent   = 55.0;
 input double ReverseStrengthPercent = 65.0;
 
-//--- Position limits
 input int NormalMaximumPositions = 2;
 input int MaximumPositionsWithAdd = 3;
 
-//--- Basket protection
 input double BasketRetracePercent = 2.0;
 
-//--- Session target
 input double SessionTargetMoney = 1000.0;
 
-//--- Automatic lot sizing
 input bool   UseAutomaticLotSizing = true;
 input double ManualLotSize = 0.01;
 
-//--- Risk/exposure safety
 input double MaximumSpreadPoints = 100.0;
 input double MinimumFreeMarginPercent = 10.0;
 
-//--- Trading execution
 input int SlippagePoints = 20;
 input ulong MagicNumber = 26090826;
 
-//====================================================================
-// GLOBAL VARIABLES
-//====================================================================
+//==================================================================
+// GLOBAL STATE
+//==================================================================
 
 bool BotRunning = false;
 bool EmergencyMode = false;
 
 double SessionStartBalance = 0.0;
+datetime SessionStartTime = 0;
 
 double BasketPeakProfit = 0.0;
 
@@ -58,21 +50,19 @@ double BuyPercent = 50.0;
 double SellPercent = 50.0;
 
 int CurrentDirection = 0;
-//  1 = BUY
-// -1 = SELL
-//  0 = neutral
 
-datetime SessionStartTime = 0;
+// Persistent terminal global-variable names
+string GV_PREFIX = "BWN_V2_";
 
-string EA_PREFIX = "BWN_";
-
-//====================================================================
+//==================================================================
 // FUNCTION DECLARATIONS
-//====================================================================
+//==================================================================
 
-void CreateInterface();
-void DeleteInterface();
-void UpdateInterface();
+void LoadPersistentState();
+void SavePersistentState();
+void DeletePersistentState();
+
+string GVName(string suffix);
 
 void UpdateScanner();
 void TradingLogic();
@@ -89,109 +79,149 @@ bool CloseDirection(ENUM_POSITION_TYPE positionType);
 int CountBotPositions();
 int CountBotPositionsByType(ENUM_POSITION_TYPE positionType);
 
-double GetBasketProfit();
 bool AllTwoPositionsAreLosing();
+
+double GetBasketProfit();
 
 double CalculateLotSize();
 double NormalizeLot(double volume);
 int VolumeDigits();
 
 bool IsSpreadOK();
-bool HasEnoughMargin(ENUM_ORDER_TYPE orderType, double volume);
+bool HasEnoughMargin(ENUM_ORDER_TYPE orderType,double volume);
 bool TradingAllowed();
+
+bool BuyDirectionValid();
+bool SellDirectionValid();
 
 string TimeframeToString(ENUM_TIMEFRAMES tf);
 string DirectionToString(int direction);
 
-void SetLabelText(string name,string text);
-void SetButtonText(string name,string text);
+void CreateInterface();
+void DeleteInterface();
+void UpdateInterface();
 
 void CreateLabel(string name,string text,int x,int y,int fontSize);
 void CreateButton(string name,string text,int x,int y,int width,int height);
 
-//====================================================================
+void SetLabelText(string name,string text);
+
+//==================================================================
 // ON INIT
-//====================================================================
+//==================================================================
 
 int OnInit()
 {
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(SlippagePoints);
 
-   // Let MT5 choose the correct filling mode for the symbol.
+   // Automatically use the symbol's supported filling mode.
    trade.SetTypeFillingBySymbol(_Symbol);
 
-   // Use the broker/account margin mode.
+   // Use the account's margin mode.
    trade.SetMarginMode();
 
-   SessionStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-   SessionStartTime = TimeCurrent();
+   // Load previously saved basket/session state.
+   LoadPersistentState();
 
-   BasketPeakProfit = 0.0;
+   // If this is the first installation, initialize session.
+   if(SessionStartBalance <= 0.0)
+   {
+      SessionStartBalance =
+         AccountInfoDouble(ACCOUNT_BALANCE);
+
+      SessionStartTime = TimeCurrent();
+
+      BasketPeakProfit = 0.0;
+
+      SavePersistentState();
+   }
 
    BotRunning = false;
    EmergencyMode = false;
 
-   CurrentDirection = 0;
-
    CreateInterface();
+
    UpdateScanner();
    UpdateInterface();
 
    EventSetTimer(1);
 
-   Print("BWN Bot initialized successfully.");
-   Print("Symbol: ", _Symbol);
-   Print("Trading timeframe: ", TimeframeToString(TradingTimeframe));
+   Print("======================================");
+   Print("BWN BOT V2 INITIALIZED");
+   Print("Symbol: ",_Symbol);
+   Print("Timeframe: ",
+         TimeframeToString(TradingTimeframe));
+   Print("Current forming candle is used.");
+   Print("======================================");
 
    return(INIT_SUCCEEDED);
 }
 
-//====================================================================
+//==================================================================
 // ON DEINIT
-//====================================================================
+//==================================================================
 
 void OnDeinit(const int reason)
 {
+   // Save peak/session state before MT5 removes/reinitializes EA.
+   SavePersistentState();
+
    EventKillTimer();
+
    DeleteInterface();
 
-   Print("BWN Bot deinitialized. Reason: ", reason);
+   Print("BWN Bot V2 deinitialized. Reason: ",reason);
 }
 
-//====================================================================
+//==================================================================
 // ON TICK
-//====================================================================
+//==================================================================
 
 void OnTick()
 {
+   // Always read the current forming candle.
    UpdateScanner();
 
-   // Emergency mode prevents new trading.
    if(EmergencyMode)
    {
-      ManageBasket();
       UpdateInterface();
       return;
    }
 
-   // Basket management continues while the bot is running.
-   if(BotRunning)
+   if(!BotRunning)
    {
-      ManageBasket();
-
-      CheckSessionTarget();
-
-      if(BotRunning && !EmergencyMode)
-         TradingLogic();
+      UpdateInterface();
+      return;
    }
+
+   // PROFIT PROTECTION FIRST.
+   ManageBasket();
+
+   // If basket protection closed everything,
+   // do not continue using stale position information.
+   if(!BotRunning || EmergencyMode)
+   {
+      UpdateInterface();
+      return;
+   }
+
+   CheckSessionTarget();
+
+   if(!BotRunning)
+   {
+      UpdateInterface();
+      return;
+   }
+
+   TradingLogic();
 
    UpdateInterface();
 }
 
-//====================================================================
+//==================================================================
 // ON TIMER
-//====================================================================
+//==================================================================
 
 void OnTimer()
 {
@@ -200,15 +230,17 @@ void OnTimer()
    if(BotRunning && !EmergencyMode)
    {
       ManageBasket();
-      CheckSessionTarget();
+
+      if(BotRunning)
+         CheckSessionTarget();
    }
 
    UpdateInterface();
 }
 
-//====================================================================
-// CHART EVENTS
-//====================================================================
+//==================================================================
+// CHART BUTTON EVENTS
+//==================================================================
 
 void OnChartEvent(const int id,
                   const long &lparam,
@@ -227,17 +259,31 @@ void OnChartEvent(const int id,
       EmergencyMode = false;
       BotRunning = true;
 
-      // Starting manually creates a fresh session target.
-      SessionStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      // START creates a completely new session.
+      SessionStartBalance =
+         AccountInfoDouble(ACCOUNT_BALANCE);
+
       SessionStartTime = TimeCurrent();
 
-      BasketPeakProfit = 0.0;
+      // If there is already a basket, establish its current
+      // profit as the starting protection reference if positive.
+      double currentBasket = GetBasketProfit();
 
-      Print("BWN Bot STARTED. New session target: ",
-            DoubleToString(SessionTargetMoney,2));
+      if(currentBasket > 0.0)
+         BasketPeakProfit = currentBasket;
+      else
+         BasketPeakProfit = 0.0;
+
+      SavePersistentState();
 
       UpdateScanner();
+
+      Print("BWN BOT STARTED.");
+      Print("Session starting balance: ",
+            DoubleToString(SessionStartBalance,2));
+
       TradingLogic();
+
       UpdateInterface();
 
       return;
@@ -251,9 +297,13 @@ void OnChartEvent(const int id,
    {
       BotRunning = false;
 
-      Print("BWN Bot STOPPED. Existing positions remain open.");
+      SavePersistentState();
+
+      Print("BWN BOT STOPPED.");
+      Print("Existing BWN positions are NOT closed.");
 
       UpdateInterface();
+
       return;
    }
 
@@ -266,21 +316,23 @@ void OnChartEvent(const int id,
       EmergencyMode = true;
       BotRunning = false;
 
-      Print("BWN BOT EMERGENCY MODE ACTIVATED.");
+      Print("BWN EMERGENCY ACTIVATED.");
 
-      // Emergency means close this EA's positions.
       CloseAllBotPositions();
 
       BasketPeakProfit = 0.0;
 
+      SavePersistentState();
+
       UpdateInterface();
+
       return;
    }
 }
 
-//====================================================================
-// UPDATE CURRENT FORMING CANDLE SCANNER
-//====================================================================
+//==================================================================
+// CURRENT FORMING CANDLE SCANNER
+//==================================================================
 
 void UpdateScanner()
 {
@@ -288,11 +340,13 @@ void UpdateScanner()
 
    ArraySetAsSeries(candle,true);
 
-   int copied = CopyRates(_Symbol,
-                          TradingTimeframe,
-                          0,
-                          1,
-                          candle);
+   // SHIFT 0 = CURRENT FORMING CANDLE.
+   int copied =
+      CopyRates(_Symbol,
+                TradingTimeframe,
+                0,
+                1,
+                candle);
 
    if(copied < 1)
    {
@@ -302,13 +356,12 @@ void UpdateScanner()
       return;
    }
 
-   // IMPORTANT:
-   // candle[0] is the CURRENT FORMING CANDLE.
    double openPrice = candle[0].open;
    double highPrice = candle[0].high;
    double lowPrice  = candle[0].low;
 
-   double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double bid =
+      SymbolInfoDouble(_Symbol,SYMBOL_BID);
 
    if(bid <= 0.0)
       return;
@@ -323,7 +376,7 @@ void UpdateScanner()
       return;
    }
 
-   // Position of current price inside the current candle.
+   // Current price position inside the CURRENT candle.
    double positionPercent =
       ((bid - lowPrice) / range) * 100.0;
 
@@ -334,31 +387,37 @@ void UpdateScanner()
       positionPercent = 100.0;
 
    //===============================================================
-   // BULLISH CURRENT CANDLE
+   // CURRENT CANDLE BULLISH
    //===============================================================
 
    if(bid > openPrice)
    {
-      BuyPercent = 50.0 + (positionPercent * 0.50);
-      SellPercent = 100.0 - BuyPercent;
+      BuyPercent =
+         50.0 + (positionPercent * 0.50);
+
+      SellPercent =
+         100.0 - BuyPercent;
 
       CurrentDirection = 1;
    }
 
    //===============================================================
-   // BEARISH CURRENT CANDLE
+   // CURRENT CANDLE BEARISH
    //===============================================================
 
    else if(bid < openPrice)
    {
-      SellPercent = 50.0 + ((100.0 - positionPercent) * 0.50);
-      BuyPercent = 100.0 - SellPercent;
+      SellPercent =
+         50.0 + ((100.0 - positionPercent) * 0.50);
+
+      BuyPercent =
+         100.0 - SellPercent;
 
       CurrentDirection = -1;
    }
 
    //===============================================================
-   // PRICE AT OPEN
+   // CURRENT PRICE AT OPEN
    //===============================================================
 
    else
@@ -381,9 +440,83 @@ void UpdateScanner()
       SellPercent = 100.0;
 }
 
-//====================================================================
+//==================================================================
+// PERSISTENT STATE — PART 1
+//==================================================================
+
+string GVName(string suffix)
+{
+   return GV_PREFIX +
+          IntegerToString((int)MagicNumber) +
+          "_" +
+          _Symbol +
+          "_" +
+          suffix;
+}
+
+//==================================================================
+// LOAD STATE
+//==================================================================
+
+void LoadPersistentState()
+{
+   string gvBalance =
+      GVName("SESSION_BALANCE");
+
+   string gvTime =
+      GVName("SESSION_TIME");
+
+   string gvPeak =
+      GVName("BASKET_PEAK");
+
+   if(GlobalVariableCheck(gvBalance))
+      SessionStartBalance =
+         GlobalVariableGet(gvBalance);
+
+   if(GlobalVariableCheck(gvTime))
+      SessionStartTime =
+         (datetime)GlobalVariableGet(gvTime);
+
+   if(GlobalVariableCheck(gvPeak))
+      BasketPeakProfit =
+         GlobalVariableGet(gvPeak);
+}
+
+//==================================================================
+// SAVE STATE
+//==================================================================
+
+void SavePersistentState()
+{
+   GlobalVariableSet(
+      GVName("SESSION_BALANCE"),
+      SessionStartBalance);
+
+   GlobalVariableSet(
+      GVName("SESSION_TIME"),
+      (double)SessionStartTime);
+
+   GlobalVariableSet(
+      GVName("BASKET_PEAK"),
+      BasketPeakProfit);
+}
+
+//==================================================================
+// DELETE STATE
+//==================================================================
+
+void DeletePersistentState()
+{
+   GlobalVariableDel(GVName("SESSION_BALANCE"));
+   GlobalVariableDel(GVName("SESSION_TIME"));
+   GlobalVariableDel(GVName("BASKET_PEAK"));
+}
+
+//==================================================================
+// END OF PART 1
+//==================================================================//==================================================================
 // TRADING LOGIC
-//====================================================================
+//==================================================================
 
 void TradingLogic()
 {
@@ -404,16 +537,15 @@ void TradingLogic()
    if(totalPositions == 0)
    {
       BasketPeakProfit = 0.0;
+      SavePersistentState();
 
-      if(BuyPercent >= EntryStrengthPercent &&
-         BuyPercent >= SellPercent)
+      if(BuyDirectionValid())
       {
          OpenBuy();
          return;
       }
 
-      if(SellPercent >= EntryStrengthPercent &&
-         SellPercent > BuyPercent)
+      if(SellDirectionValid())
       {
          OpenSell();
          return;
@@ -423,19 +555,23 @@ void TradingLogic()
    }
 
    //===============================================================
-   // EXISTING BUY POSITIONS
+   // CURRENT POSITION COUNTS
    //===============================================================
 
-   int buyPositions = CountBotPositionsByType(POSITION_TYPE_BUY);
-   int sellPositions = CountBotPositionsByType(POSITION_TYPE_SELL);
+   int buyPositions =
+      CountBotPositionsByType(POSITION_TYPE_BUY);
 
-   // Immediate reversal:
-   // SELL reaches 65% while BUY positions exist.
+   int sellPositions =
+      CountBotPositionsByType(POSITION_TYPE_SELL);
+
+   //===============================================================
+   // IMMEDIATE SELL REVERSAL
+   //===============================================================
+
    if(buyPositions > 0 &&
       SellPercent >= ReverseStrengthPercent)
    {
-      Print("SELL reversal signal detected at ",
-            DoubleToString(SellPercent,1), "%.");
+      Print("65%+ SELL reversal detected.");
 
       if(CloseDirection(POSITION_TYPE_BUY))
       {
@@ -447,16 +583,13 @@ void TradingLogic()
    }
 
    //===============================================================
-   // EXISTING SELL POSITIONS
+   // IMMEDIATE BUY REVERSAL
    //===============================================================
 
-   // Immediate reversal:
-   // BUY reaches 65% while SELL positions exist.
    if(sellPositions > 0 &&
       BuyPercent >= ReverseStrengthPercent)
    {
-      Print("BUY reversal signal detected at ",
-            DoubleToString(BuyPercent,1), "%.");
+      Print("65%+ BUY reversal detected.");
 
       if(CloseDirection(POSITION_TYPE_SELL))
       {
@@ -473,13 +606,13 @@ void TradingLogic()
 
    if(totalPositions < NormalMaximumPositions)
    {
-      if(BuyPositionsDirectionValid())
+      if(BuyDirectionValid())
       {
          OpenBuy();
          return;
       }
 
-      if(SellPositionsDirectionValid())
+      if(SellDirectionValid())
       {
          OpenSell();
          return;
@@ -487,24 +620,22 @@ void TradingLogic()
    }
 
    //===============================================================
-   // NEW SPECIAL RULE
+   // SPECIAL ADDITION RULE
    //
-   // Exactly 2 positions are open.
-   // BOTH are losing.
-   // Allow ONE additional position in current candle direction.
-   // Maximum becomes 3.
+   // Exactly 2 positions.
+   // BOTH positions must individually be losing.
+   // Then one additional position is allowed.
    //===============================================================
 
    if(totalPositions == NormalMaximumPositions)
    {
       if(AllTwoPositionsAreLosing())
       {
-         Print("Both normal positions are losing.");
-
          if(CurrentDirection == 1 &&
             BuyPercent >= EntryStrengthPercent)
          {
-            Print("Adding one BUY position because both positions are losing.");
+            Print("ADDING ONE BUY: both normal positions are losing.");
+
             OpenBuy();
             return;
          }
@@ -512,21 +643,27 @@ void TradingLogic()
          if(CurrentDirection == -1 &&
             SellPercent >= EntryStrengthPercent)
          {
-            Print("Adding one SELL position because both positions are losing.");
+            Print("ADDING ONE SELL: both normal positions are losing.");
+
             OpenSell();
             return;
          }
       }
    }
 
-   // If 3 positions are open, no further additions.
+   //===============================================================
+   // THREE POSITIONS = ABSOLUTE ADDITION LIMIT
+   //===============================================================
+
+   if(totalPositions >= MaximumPositionsWithAdd)
+      return;
 }
 
-//====================================================================
-// HELPER: VALID BUY DIRECTION
-//====================================================================
+//==================================================================
+// BUY DIRECTION VALID
+//==================================================================
 
-bool BuyPositionsDirectionValid()
+bool BuyDirectionValid()
 {
    if(BuyPercent >= EntryStrengthPercent &&
       BuyPercent >= SellPercent)
@@ -535,11 +672,11 @@ bool BuyPositionsDirectionValid()
    return false;
 }
 
-//====================================================================
-// HELPER: VALID SELL DIRECTION
-//====================================================================
+//==================================================================
+// SELL DIRECTION VALID
+//==================================================================
 
-bool SellPositionsDirectionValid()
+bool SellDirectionValid()
 {
    if(SellPercent >= EntryStrengthPercent &&
       SellPercent > BuyPercent)
@@ -548,11 +685,9 @@ bool SellPositionsDirectionValid()
    return false;
 }
 
-//====================================================================
-// END OF PART 1
-//====================================================================//====================================================================
+//==================================================================
 // OPEN BUY
-//====================================================================
+//==================================================================
 
 bool OpenBuy()
 {
@@ -561,8 +696,6 @@ bool OpenBuy()
 
    int total = CountBotPositions();
 
-   // Normal limit is 2.
-   // Third position is allowed only through the special losing rule.
    if(total >= MaximumPositionsWithAdd)
       return false;
 
@@ -575,44 +708,36 @@ bool OpenBuy()
       return false;
 
    if(!HasEnoughMargin(ORDER_TYPE_BUY,lot))
-   {
-      Print("BUY rejected: insufficient free margin.");
-      return false;
-   }
-
-   double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-
-   if(ask <= 0.0)
       return false;
 
-   bool result = trade.Buy(lot,
-                           _Symbol,
-                           0.0,
-                           0.0,
-                           0.0,
-                           "BWN BUY");
+   bool result =
+      trade.Buy(
+         lot,
+         _Symbol,
+         0.0,
+         0.0,
+         0.0,
+         "BWN BUY");
 
    if(!result)
    {
-      Print("BUY failed. Retcode: ",
+      Print("BUY FAILED. Retcode=",
             trade.ResultRetcode(),
-            " - ",
+            " ",
             trade.ResultRetcodeDescription());
 
       return false;
    }
 
-   Print("BUY opened. Lot: ",
-         DoubleToString(lot,VolumeDigits()),
-         " Price: ",
-         DoubleToString(ask,_Digits));
+   Print("BUY OPENED. Lot=",
+         DoubleToString(lot,VolumeDigits()));
 
    return true;
 }
 
-//====================================================================
+//==================================================================
 // OPEN SELL
-//====================================================================
+//==================================================================
 
 bool OpenSell()
 {
@@ -633,77 +758,68 @@ bool OpenSell()
       return false;
 
    if(!HasEnoughMargin(ORDER_TYPE_SELL,lot))
-   {
-      Print("SELL rejected: insufficient free margin.");
-      return false;
-   }
-
-   double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
-
-   if(bid <= 0.0)
       return false;
 
-   bool result = trade.Sell(lot,
-                            _Symbol,
-                            0.0,
-                            0.0,
-                            0.0,
-                            "BWN SELL");
+   bool result =
+      trade.Sell(
+         lot,
+         _Symbol,
+         0.0,
+         0.0,
+         0.0,
+         "BWN SELL");
 
    if(!result)
    {
-      Print("SELL failed. Retcode: ",
+      Print("SELL FAILED. Retcode=",
             trade.ResultRetcode(),
-            " - ",
+            " ",
             trade.ResultRetcodeDescription());
 
       return false;
    }
 
-   Print("SELL opened. Lot: ",
-         DoubleToString(lot,VolumeDigits()),
-         " Price: ",
-         DoubleToString(bid,_Digits));
+   Print("SELL OPENED. Lot=",
+         DoubleToString(lot,VolumeDigits()));
 
    return true;
 }
 
-//====================================================================
-// CALCULATE AUTOMATIC LOT SIZE
-//====================================================================
+//==================================================================
+// AUTOMATIC LOT SIZE
+//==================================================================
 
 double CalculateLotSize()
 {
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-
-   double lot;
-
    if(!UseAutomaticLotSizing)
-      lot = ManualLotSize;
-   else
-   {
-      // $0.00 - $9.99  = 0.01
-      // $10 - $19.99   = 0.02
-      // $20 - $29.99   = 0.03
-      // etc.
+      return NormalizeLot(ManualLotSize);
 
-      int tier = (int)MathFloor(balance / 10.0);
+   double balance =
+      AccountInfoDouble(ACCOUNT_BALANCE);
 
-      lot = 0.01 * (tier + 1);
-   }
+   int tier =
+      (int)MathFloor(balance / 10.0);
+
+   double lot =
+      0.01 * (tier + 1);
 
    return NormalizeLot(lot);
 }
 
-//====================================================================
-// NORMALIZE LOT TO BROKER RULES
-//====================================================================
+//==================================================================
+// BROKER LOT NORMALIZATION
+//==================================================================
 
 double NormalizeLot(double volume)
 {
-   double minLot  = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
-   double maxLot  = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
-   double stepLot = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   double minLot =
+      SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+
+   double maxLot =
+      SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+
+   double stepLot =
+      SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
 
    if(minLot <= 0.0)
       minLot = 0.01;
@@ -720,7 +836,8 @@ double NormalizeLot(double volume)
    if(volume > maxLot)
       volume = maxLot;
 
-   double steps = MathFloor((volume / stepLot) + 0.0000001);
+   double steps =
+      MathFloor((volume / stepLot) + 0.0000001);
 
    volume = steps * stepLot;
 
@@ -730,16 +847,19 @@ double NormalizeLot(double volume)
    if(volume > maxLot)
       volume = maxLot;
 
-   return NormalizeDouble(volume,VolumeDigits());
+   return NormalizeDouble(
+      volume,
+      VolumeDigits());
 }
 
-//====================================================================
-// VOLUME DECIMAL PLACES
-//====================================================================
+//==================================================================
+// VOLUME DIGITS
+//==================================================================
 
 int VolumeDigits()
 {
-   double step = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   double step =
+      SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
 
    if(step >= 1.0)
       return 0;
@@ -756,23 +876,27 @@ int VolumeDigits()
    return 4;
 }
 
-//====================================================================
-// SPREAD CHECK
-//====================================================================
+//==================================================================
+// SPREAD
+//==================================================================
 
 bool IsSpreadOK()
 {
-   double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-   double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double ask =
+      SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+
+   double bid =
+      SymbolInfoDouble(_Symbol,SYMBOL_BID);
 
    if(ask <= 0.0 || bid <= 0.0)
       return false;
 
-   double spreadPoints = (ask - bid) / _Point;
+   double spreadPoints =
+      (ask - bid) / _Point;
 
    if(spreadPoints > MaximumSpreadPoints)
    {
-      Print("Spread too high: ",
+      Print("Spread protection. Current=",
             DoubleToString(spreadPoints,1),
             " points.");
 
@@ -782,56 +906,64 @@ bool IsSpreadOK()
    return true;
 }
 
-//====================================================================
-// MARGIN CHECK
-//====================================================================
+//==================================================================
+// MARGIN PROTECTION
+//==================================================================
 
-bool HasEnoughMargin(ENUM_ORDER_TYPE orderType,double volume)
+bool HasEnoughMargin(ENUM_ORDER_TYPE orderType,
+                     double volume)
 {
-   double price;
+   double price = 0.0;
 
    if(orderType == ORDER_TYPE_BUY)
-      price = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      price =
+         SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    else
-      price = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      price =
+         SymbolInfoDouble(_Symbol,SYMBOL_BID);
 
    if(price <= 0.0)
       return false;
 
    double requiredMargin = 0.0;
 
-   if(!OrderCalcMargin(orderType,
-                       _Symbol,
-                       volume,
-                       price,
-                       requiredMargin))
+   if(!OrderCalcMargin(
+         orderType,
+         _Symbol,
+         volume,
+         price,
+         requiredMargin))
    {
       Print("OrderCalcMargin failed.");
       return false;
    }
 
-   double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
-   double equity     = AccountInfoDouble(ACCOUNT_EQUITY);
+   double freeMargin =
+      AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+
+   double equity =
+      AccountInfoDouble(ACCOUNT_EQUITY);
 
    if(equity <= 0.0)
       return false;
 
-   double minimumFreeMargin =
-      equity * (MinimumFreeMarginPercent / 100.0);
+   double minimumFree =
+      equity *
+      (MinimumFreeMarginPercent / 100.0);
 
-   if((freeMargin - requiredMargin) < minimumFreeMargin)
+   if((freeMargin - requiredMargin) <
+      minimumFree)
    {
-      Print("Margin protection: new trade rejected.");
-
+      Print("Margin protection blocked new trade.");
       return false;
    }
 
    return true;
 }
 
-//====================================================================
-// GENERAL TRADING PERMISSION
-//====================================================================
+//==================================================================
+// TRADING PERMISSION
+//==================================================================
 
 bool TradingAllowed()
 {
@@ -844,15 +976,20 @@ bool TradingAllowed()
    if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))
       return false;
 
-   if(!SymbolInfoInteger(_Symbol,SYMBOL_TRADE_MODE))
+   long tradeMode =
+      SymbolInfoInteger(
+         _Symbol,
+         SYMBOL_TRADE_MODE);
+
+   if(tradeMode == SYMBOL_TRADE_MODE_DISABLED)
       return false;
 
    return true;
 }
 
-//====================================================================
-// COUNT ALL BWN POSITIONS
-//====================================================================
+//==================================================================
+// COUNT BWN POSITIONS
+//==================================================================
 
 int CountBotPositions()
 {
@@ -862,7 +999,8 @@ int CountBotPositions()
 
    for(int i = total - 1; i >= 0; i--)
    {
-      ulong ticket = PositionGetTicket(i);
+      ulong ticket =
+         PositionGetTicket(i);
 
       if(ticket == 0)
          continue;
@@ -888,11 +1026,12 @@ int CountBotPositions()
    return count;
 }
 
-//====================================================================
-// COUNT POSITIONS BY DIRECTION
-//====================================================================
+//==================================================================
+// COUNT BY POSITION TYPE
+//==================================================================
 
-int CountBotPositionsByType(ENUM_POSITION_TYPE positionType)
+int CountBotPositionsByType(
+   ENUM_POSITION_TYPE positionType)
 {
    int count = 0;
 
@@ -900,7 +1039,8 @@ int CountBotPositionsByType(ENUM_POSITION_TYPE positionType)
 
    for(int i = total - 1; i >= 0; i--)
    {
-      ulong ticket = PositionGetTicket(i);
+      ulong ticket =
+         PositionGetTicket(i);
 
       if(ticket == 0)
          continue;
@@ -915,7 +1055,8 @@ int CountBotPositionsByType(ENUM_POSITION_TYPE positionType)
          PositionGetInteger(POSITION_MAGIC);
 
       ENUM_POSITION_TYPE type =
-         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+         (ENUM_POSITION_TYPE)
+         PositionGetInteger(POSITION_TYPE);
 
       if(symbol != _Symbol)
          continue;
@@ -932,24 +1073,24 @@ int CountBotPositionsByType(ENUM_POSITION_TYPE positionType)
    return count;
 }
 
-//====================================================================
-// CHECK IF BOTH NORMAL POSITIONS ARE LOSING
-//====================================================================
+//==================================================================
+// BOTH NORMAL POSITIONS LOSING
+//==================================================================
 
 bool AllTwoPositionsAreLosing()
 {
-   int total = CountBotPositions();
-
-   if(total != NormalMaximumPositions)
+   if(CountBotPositions() !=
+      NormalMaximumPositions)
       return false;
 
    int checked = 0;
 
-   int totalPositions = PositionsTotal();
+   int total = PositionsTotal();
 
-   for(int i = totalPositions - 1; i >= 0; i--)
+   for(int i = total - 1; i >= 0; i--)
    {
-      ulong ticket = PositionGetTicket(i);
+      ulong ticket =
+         PositionGetTicket(i);
 
       if(ticket == 0)
          continue;
@@ -975,24 +1116,25 @@ bool AllTwoPositionsAreLosing()
       double swap =
          PositionGetDouble(POSITION_SWAP);
 
-      double totalProfit = profit + swap;
+      double combined =
+         profit + swap;
 
       checked++;
 
-      // Every one of the two must be below zero.
-      if(totalProfit >= 0.0)
+      if(combined >= 0.0)
          return false;
 
       if(checked >= NormalMaximumPositions)
          break;
    }
 
-   return (checked == NormalMaximumPositions);
+   return checked ==
+          NormalMaximumPositions;
 }
 
-//====================================================================
-// GET TOTAL BASKET PROFIT
-//====================================================================
+//==================================================================
+// BASKET PROFIT
+//==================================================================
 
 double GetBasketProfit()
 {
@@ -1002,7 +1144,8 @@ double GetBasketProfit()
 
    for(int i = total - 1; i >= 0; i--)
    {
-      ulong ticket = PositionGetTicket(i);
+      ulong ticket =
+         PositionGetTicket(i);
 
       if(ticket == 0)
          continue;
@@ -1032,138 +1175,173 @@ double GetBasketProfit()
    return totalProfit;
 }
 
-//====================================================================
-// BASKET MANAGEMENT
-//====================================================================
+//==================================================================
+// END OF PART 2
+//==================================================================//==================================================================
+// STRICT BASKET PROFIT PROTECTION
+//==================================================================
 
 void ManageBasket()
 {
-   int total = CountBotPositions();
+   int totalPositions =
+      CountBotPositions();
 
    //===============================================================
-   // NO POSITIONS
+   // NO BASKET
    //===============================================================
 
-   if(total == 0)
+   if(totalPositions == 0)
    {
       BasketPeakProfit = 0.0;
+      SavePersistentState();
       return;
    }
 
-   double basketProfit = GetBasketProfit();
+   double basketProfit =
+      GetBasketProfit();
 
    //===============================================================
-   // RECORD HIGHEST POSITIVE BASKET PROFIT
+   // NEW PROFIT PEAK
    //===============================================================
 
-   if(basketProfit > 0.0)
+   if(basketProfit > BasketPeakProfit)
    {
-      if(basketProfit > BasketPeakProfit)
-      {
-         BasketPeakProfit = basketProfit;
+      BasketPeakProfit =
+         basketProfit;
 
-         Print("New basket peak profit: $",
-               DoubleToString(BasketPeakProfit,2));
-      }
+      // IMPORTANT:
+      // Save immediately so an EA reinitialization does not
+      // forget that the basket had already reached this profit.
+      SavePersistentState();
+
+      Print("NEW BASKET PEAK = $",
+            DoubleToString(
+               BasketPeakProfit,2));
    }
 
    //===============================================================
-   // 2% PEAK PROFIT RETRACEMENT
-   //
-   // Example:
-   // Peak = $100
-   // Allowed retracement = $2
-   // Protection level = $98
-   //
-   // Peak = $10
-   // Allowed retracement = $0.20
-   // Protection level = $9.80
+   // ONLY PROTECT AFTER A POSITIVE PEAK EXISTS
    //===============================================================
 
-   if(BasketPeakProfit > 0.0)
+   if(BasketPeakProfit <= 0.0)
+      return;
+
+   //===============================================================
+   // 2% RETRACEMENT CALCULATION
+   //===============================================================
+
+   double allowedRetracement =
+      BasketPeakProfit *
+      (BasketRetracePercent / 100.0);
+
+   double protectionLevel =
+      BasketPeakProfit -
+      allowedRetracement;
+
+   //===============================================================
+   // STRICT PROTECTION
+   //
+   // $10 peak -> $9.80 protection
+   // $100 peak -> $98 protection
+   //
+   // It is based ONLY on the highest basket profit.
+   //===============================================================
+
+   if(basketProfit <= protectionLevel)
    {
-      double allowedRetracement =
-         BasketPeakProfit *
-         (BasketRetracePercent / 100.0);
+      Print("======================================");
+      Print("BASKET PROFIT PROTECTION TRIGGERED");
+      Print("Peak = $",
+            DoubleToString(
+               BasketPeakProfit,2));
 
-      double protectionLevel =
-         BasketPeakProfit -
-         allowedRetracement;
+      Print("Current = $",
+            DoubleToString(
+               basketProfit,2));
 
-      if(basketProfit <= protectionLevel)
+      Print("Protection = $",
+            DoubleToString(
+               protectionLevel,2));
+
+      Print("Closing ENTIRE BASKET.");
+      Print("======================================");
+
+      bool closed =
+         CloseAllBotPositions();
+
+      if(closed)
       {
-         Print("Basket profit retracement triggered.");
-         Print("Peak: $",
-               DoubleToString(BasketPeakProfit,2),
-               " Current: $",
-               DoubleToString(basketProfit,2),
-               " Protection: $",
-               DoubleToString(protectionLevel,2));
+         BasketPeakProfit = 0.0;
 
-         // Close the ENTIRE basket.
-         // This is a basket-level protection, not an
-         // individual losing-position stop.
-         bool closed = CloseAllBotPositions();
+         SavePersistentState();
 
-         if(closed)
+         // Immediately read the CURRENT FORMING candle again.
+         UpdateScanner();
+
+         // Immediately search for a new basket.
+         if(BotRunning &&
+            !EmergencyMode)
          {
-            BasketPeakProfit = 0.0;
-
-            // Immediately rescan CURRENT FORMING candle.
-            UpdateScanner();
-
-            // Immediately look for a new entry.
-            if(BotRunning &&
-               !EmergencyMode)
-            {
-               TradingLogic();
-            }
+            TradingLogic();
          }
       }
+
+      return;
    }
 }
 
-//====================================================================
+//==================================================================
 // SESSION TARGET
-//====================================================================
+//==================================================================
 
 void CheckSessionTarget()
 {
    if(!BotRunning)
       return;
 
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double basketProfit = GetBasketProfit();
+   double balance =
+      AccountInfoDouble(ACCOUNT_BALANCE);
 
-   // Includes realized balance growth plus current floating
-   // basket profit.
+   double basketProfit =
+      GetBasketProfit();
+
    double sessionProfit =
-      (balance - SessionStartBalance) +
-      basketProfit;
+      (balance - SessionStartBalance)
+      + basketProfit;
 
    if(sessionProfit >= SessionTargetMoney)
    {
-      Print("SESSION TARGET REACHED: $",
-            DoubleToString(sessionProfit,2));
+      Print("======================================");
+      Print("SESSION TARGET REACHED");
+      Print("Session profit = $",
+            DoubleToString(
+               sessionProfit,2));
+      Print("Target = $",
+            DoubleToString(
+               SessionTargetMoney,2));
+      Print("======================================");
 
       CloseAllBotPositions();
 
       BotRunning = false;
+
       BasketPeakProfit = 0.0;
 
-      Print("BWN Bot stopped after reaching session target.");
+      SavePersistentState();
+
+      Print("BWN BOT STOPPED.");
    }
 }
 
-//====================================================================
+//==================================================================
 // CLOSE ALL BWN POSITIONS
-//====================================================================
+//==================================================================
 
 bool CloseAllBotPositions()
 {
    bool allClosed = true;
 
-   for(int pass = 0; pass < 3; pass++)
+   for(int pass = 0; pass < 5; pass++)
    {
       bool found = false;
 
@@ -1171,7 +1349,8 @@ bool CloseAllBotPositions()
 
       for(int i = total - 1; i >= 0; i--)
       {
-         ulong ticket = PositionGetTicket(i);
+         ulong ticket =
+            PositionGetTicket(i);
 
          if(ticket == 0)
             continue;
@@ -1180,10 +1359,12 @@ bool CloseAllBotPositions()
             continue;
 
          string symbol =
-            PositionGetString(POSITION_SYMBOL);
+            PositionGetString(
+               POSITION_SYMBOL);
 
          long magic =
-            PositionGetInteger(POSITION_MAGIC);
+            PositionGetInteger(
+               POSITION_MAGIC);
 
          if(symbol != _Symbol)
             continue;
@@ -1195,14 +1376,14 @@ bool CloseAllBotPositions()
 
          if(!trade.PositionClose(ticket))
          {
-            Print("Failed to close ticket ",
-                  ticket,
-                  ". Retcode: ",
-                  trade.ResultRetcode(),
-                  " - ",
-                  trade.ResultRetcodeDescription());
-
             allClosed = false;
+
+            Print("Failed closing ticket ",
+                  ticket,
+                  ". Retcode=",
+                  trade.ResultRetcode(),
+                  " ",
+                  trade.ResultRetcodeDescription());
          }
       }
 
@@ -1216,15 +1397,16 @@ bool CloseAllBotPositions()
    return allClosed;
 }
 
-//====================================================================
+//==================================================================
 // CLOSE ONE DIRECTION
-//====================================================================
+//==================================================================
 
-bool CloseDirection(ENUM_POSITION_TYPE positionType)
+bool CloseDirection(
+   ENUM_POSITION_TYPE positionType)
 {
    bool allClosed = true;
 
-   for(int pass = 0; pass < 3; pass++)
+   for(int pass = 0; pass < 5; pass++)
    {
       bool found = false;
 
@@ -1232,7 +1414,8 @@ bool CloseDirection(ENUM_POSITION_TYPE positionType)
 
       for(int i = total - 1; i >= 0; i--)
       {
-         ulong ticket = PositionGetTicket(i);
+         ulong ticket =
+            PositionGetTicket(i);
 
          if(ticket == 0)
             continue;
@@ -1241,13 +1424,17 @@ bool CloseDirection(ENUM_POSITION_TYPE positionType)
             continue;
 
          string symbol =
-            PositionGetString(POSITION_SYMBOL);
+            PositionGetString(
+               POSITION_SYMBOL);
 
          long magic =
-            PositionGetInteger(POSITION_MAGIC);
+            PositionGetInteger(
+               POSITION_MAGIC);
 
          ENUM_POSITION_TYPE type =
-            (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            (ENUM_POSITION_TYPE)
+            PositionGetInteger(
+               POSITION_TYPE);
 
          if(symbol != _Symbol)
             continue;
@@ -1262,14 +1449,14 @@ bool CloseDirection(ENUM_POSITION_TYPE positionType)
 
          if(!trade.PositionClose(ticket))
          {
-            Print("Failed to close ticket ",
-                  ticket,
-                  ". Retcode: ",
-                  trade.ResultRetcode(),
-                  " - ",
-                  trade.ResultRetcodeDescription());
-
             allClosed = false;
+
+            Print("Failed closing ticket ",
+                  ticket,
+                  ". Retcode=",
+                  trade.ResultRetcode(),
+                  " ",
+                  trade.ResultRetcodeDescription());
          }
       }
 
@@ -1277,17 +1464,19 @@ bool CloseDirection(ENUM_POSITION_TYPE positionType)
          break;
    }
 
-   if(CountBotPositionsByType(positionType) > 0)
+   if(CountBotPositionsByType(
+         positionType) > 0)
       allClosed = false;
 
    return allClosed;
 }
 
-//====================================================================
-// TIMEFRAME NAME
-//====================================================================
+//==================================================================
+// TIMEFRAME DISPLAY
+//==================================================================
 
-string TimeframeToString(ENUM_TIMEFRAMES tf)
+string TimeframeToString(
+   ENUM_TIMEFRAMES tf)
 {
    switch(tf)
    {
@@ -1355,14 +1544,15 @@ string TimeframeToString(ENUM_TIMEFRAMES tf)
          return "MN1";
    }
 
-   return "CUSTOM";
+   return "SELECTED";
 }
 
-//====================================================================
-// DIRECTION NAME
-//====================================================================
+//==================================================================
+// DIRECTION DISPLAY
+//==================================================================
 
-string DirectionToString(int direction)
+string DirectionToString(
+   int direction)
 {
    if(direction == 1)
       return "BUY";
@@ -1373,123 +1563,97 @@ string DirectionToString(int direction)
    return "NEUTRAL";
 }
 
-//====================================================================
-// END OF PART 2
-//====================================================================//====================================================================
-// CREATE DASHBOARD
-//====================================================================
+//==================================================================
+// CREATE INTERFACE
+//==================================================================
 
 void CreateInterface()
 {
-   //===============================================================
-   // TITLE
-   //===============================================================
+   CreateLabel(
+      "BWN_TITLE",
+      "BWN BOT V2",
+      20,20,16);
 
-   CreateLabel("BWN_TITLE",
-               "BWN BOT",
-               20,
-               20,
-               16);
+   CreateLabel(
+      "BWN_BUY",
+      "BUY: 50.0%",
+      20,55,12);
 
-   //===============================================================
-   // LIVE SCANNER
-   //===============================================================
+   CreateLabel(
+      "BWN_SELL",
+      "SELL: 50.0%",
+      20,80,12);
 
-   CreateLabel("BWN_BUY",
-               "BUY: 50.0%",
-               20,
-               55,
-               12);
+   CreateLabel(
+      "BWN_STATUS",
+      "STATUS: STOPPED",
+      20,110,12);
 
-   CreateLabel("BWN_SELL",
-               "SELL: 50.0%",
-               20,
-               80,
-               12);
+   CreateLabel(
+      "BWN_TF",
+      "TIMEFRAME: M1",
+      20,135,12);
 
-   CreateLabel("BWN_STATUS",
-               "STATUS: STOPPED",
-               20,
-               110,
-               12);
+   CreateLabel(
+      "BWN_TRADES",
+      "TRADES: 0/2",
+      20,160,12);
 
-   CreateLabel("BWN_TF",
-               "TIMEFRAME: M1",
-               20,
-               135,
-               12);
+   CreateLabel(
+      "BWN_BASKET",
+      "BASKET: $0.00",
+      20,185,12);
 
-   CreateLabel("BWN_TRADES",
-               "TRADES: 0/2",
-               20,
-               160,
-               12);
+   CreateLabel(
+      "BWN_PEAK",
+      "PEAK: $0.00",
+      20,210,12);
 
-   CreateLabel("BWN_BASKET",
-               "BASKET: $0.00",
-               20,
-               185,
-               12);
+   CreateLabel(
+      "BWN_TARGET",
+      "TARGET: $0.00 / $1000.00",
+      20,235,12);
 
-   CreateLabel("BWN_PEAK",
-               "PEAK: $0.00",
-               20,
-               210,
-               12);
+   CreateLabel(
+      "BWN_DIRECTION",
+      "DIRECTION: NEUTRAL",
+      20,260,12);
 
-   CreateLabel("BWN_TARGET",
-               "TARGET: $0.00 / $1000.00",
-               20,
-               235,
-               12);
+   CreateButton(
+      "BWN_START",
+      "START",
+      250,55,100,35);
 
-   CreateLabel("BWN_DIRECTION",
-               "DIRECTION: NEUTRAL",
-               20,
-               260,
-               12);
+   CreateButton(
+      "BWN_STOP",
+      "STOP",
+      250,100,100,35);
 
-   //===============================================================
-   // BUTTONS
-   //===============================================================
-
-   CreateButton("BWN_START",
-                "START",
-                250,
-                55,
-                100,
-                35);
-
-   CreateButton("BWN_STOP",
-                "STOP",
-                250,
-                100,
-                100,
-                35);
-
-   CreateButton("BWN_EMERGENCY",
-                "EMERGENCY",
-                230,
-                145,
-                140,
-                40);
+   CreateButton(
+      "BWN_EMERGENCY",
+      "EMERGENCY",
+      230,145,140,40);
 }
 
-//====================================================================
-// UPDATE DASHBOARD
-//====================================================================
+//==================================================================
+// UPDATE INTERFACE
+//==================================================================
 
 void UpdateInterface()
 {
-   double basketProfit = GetBasketProfit();
+   double basketProfit =
+      GetBasketProfit();
 
-   int totalTrades = CountBotPositions();
+   int trades =
+      CountBotPositions();
 
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double balance =
+      AccountInfoDouble(
+         ACCOUNT_BALANCE);
 
    double sessionProfit =
-      (balance - SessionStartBalance) +
-      basketProfit;
+      (balance - SessionStartBalance)
+      + basketProfit;
 
    string status;
 
@@ -1500,174 +1664,224 @@ void UpdateInterface()
    else
       status = "STATUS: STOPPED";
 
-   SetLabelText("BWN_BUY",
-                "BUY: " +
-                DoubleToString(BuyPercent,1) +
-                "%");
+   SetLabelText(
+      "BWN_BUY",
+      "BUY: " +
+      DoubleToString(
+         BuyPercent,1) +
+      "%");
 
-   SetLabelText("BWN_SELL",
-                "SELL: " +
-                DoubleToString(SellPercent,1) +
-                "%");
+   SetLabelText(
+      "BWN_SELL",
+      "SELL: " +
+      DoubleToString(
+         SellPercent,1) +
+      "%");
 
-   SetLabelText("BWN_STATUS",
-                status);
+   SetLabelText(
+      "BWN_STATUS",
+      status);
 
-   SetLabelText("BWN_TF",
-                "TIMEFRAME: " +
-                TimeframeToString(TradingTimeframe));
+   SetLabelText(
+      "BWN_TF",
+      "TIMEFRAME: " +
+      TimeframeToString(
+         TradingTimeframe));
 
-   SetLabelText("BWN_TRADES",
-                "TRADES: " +
-                IntegerToString(totalTrades) +
-                "/" +
-                IntegerToString(NormalMaximumPositions) +
-                "  ADD MAX: " +
-                IntegerToString(MaximumPositionsWithAdd));
+   SetLabelText(
+      "BWN_TRADES",
+      "TRADES: " +
+      IntegerToString(trades) +
+      "/2  ADD MAX: 3");
 
-   SetLabelText("BWN_BASKET",
-                "BASKET: $" +
-                DoubleToString(basketProfit,2));
+   SetLabelText(
+      "BWN_BASKET",
+      "BASKET: $" +
+      DoubleToString(
+         basketProfit,2));
 
-   SetLabelText("BWN_PEAK",
-                "PEAK: $" +
-                DoubleToString(BasketPeakProfit,2));
+   SetLabelText(
+      "BWN_PEAK",
+      "PEAK: $" +
+      DoubleToString(
+         BasketPeakProfit,2));
 
-   SetLabelText("BWN_TARGET",
-                "TARGET: $" +
-                DoubleToString(sessionProfit,2) +
-                " / $" +
-                DoubleToString(SessionTargetMoney,2));
+   SetLabelText(
+      "BWN_TARGET",
+      "TARGET: $" +
+      DoubleToString(
+         sessionProfit,2) +
+      " / $" +
+      DoubleToString(
+         SessionTargetMoney,2));
 
-   SetLabelText("BWN_DIRECTION",
-                "DIRECTION: " +
-                DirectionToString(CurrentDirection));
+   SetLabelText(
+      "BWN_DIRECTION",
+      "DIRECTION: " +
+      DirectionToString(
+         CurrentDirection));
 }
 
-//====================================================================
+//==================================================================
 // CREATE LABEL
-//====================================================================
+//==================================================================
 
-void CreateLabel(string name,
-                 string text,
-                 int x,
-                 int y,
-                 int fontSize)
+void CreateLabel(
+   string name,
+   string text,
+   int x,
+   int y,
+   int fontSize)
 {
    if(ObjectFind(0,name) >= 0)
       ObjectDelete(0,name);
 
-   if(!ObjectCreate(0,
-                    name,
-                    OBJ_LABEL,
-                    0,
-                    0,
-                    0))
-   {
-      Print("Failed to create label: ",name);
+   if(!ObjectCreate(
+         0,
+         name,
+         OBJ_LABEL,
+         0,
+         0,
+         0))
       return;
-   }
 
-   ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
-   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
-   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
-   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,fontSize);
-   ObjectSetString(0,name,OBJPROP_FONT,"Arial");
-   ObjectSetString(0,name,OBJPROP_TEXT,text);
+   ObjectSetInteger(
+      0,name,
+      OBJPROP_CORNER,
+      CORNER_LEFT_UPPER);
 
-   ObjectSetInteger(0,name,
-                    OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(
+      0,name,
+      OBJPROP_XDISTANCE,
+      x);
 
-   ObjectSetInteger(0,name,
-                    OBJPROP_HIDDEN,true);
+   ObjectSetInteger(
+      0,name,
+      OBJPROP_YDISTANCE,
+      y);
+
+   ObjectSetInteger(
+      0,name,
+      OBJPROP_FONTSIZE,
+      fontSize);
+
+   ObjectSetString(
+      0,name,
+      OBJPROP_FONT,
+      "Arial");
+
+   ObjectSetString(
+      0,name,
+      OBJPROP_TEXT,
+      text);
+
+   ObjectSetInteger(
+      0,name,
+      OBJPROP_SELECTABLE,
+      false);
+
+   ObjectSetInteger(
+      0,name,
+      OBJPROP_HIDDEN,
+      true);
 }
 
-//====================================================================
+//==================================================================
 // CREATE BUTTON
-//====================================================================
+//==================================================================
 
-void CreateButton(string name,
-                  string text,
-                  int x,
-                  int y,
-                  int width,
-                  int height)
+void CreateButton(
+   string name,
+   string text,
+   int x,
+   int y,
+   int width,
+   int height)
 {
    if(ObjectFind(0,name) >= 0)
       ObjectDelete(0,name);
 
-   if(!ObjectCreate(0,
-                    name,
-                    OBJ_BUTTON,
-                    0,
-                    0,
-                    0))
-   {
-      Print("Failed to create button: ",name);
+   if(!ObjectCreate(
+         0,
+         name,
+         OBJ_BUTTON,
+         0,
+         0,
+         0))
       return;
+
+   ObjectSetInteger(
+      0,name,
+      OBJPROP_CORNER,
+      CORNER_LEFT_UPPER);
+
+   ObjectSetInteger(
+      0,name,
+      OBJPROP_XDISTANCE,
+      x);
+
+   ObjectSetInteger(
+      0,name,
+      OBJPROP_YDISTANCE,
+      y);
+
+   ObjectSetInteger(
+      0,name,
+      OBJPROP_XSIZE,
+      width);
+
+   ObjectSetInteger(
+      0,name,
+      OBJPROP_YSIZE,
+      height);
+
+   ObjectSetInteger(
+      0,name,
+      OBJPROP_FONTSIZE,
+      10);
+
+   ObjectSetString(
+      0,name,
+      OBJPROP_TEXT,
+      text);
+
+   ObjectSetString(
+      0,name,
+      OBJPROP_FONT,
+      "Arial");
+
+   ObjectSetInteger(
+      0,name,
+      OBJPROP_SELECTABLE,
+      false);
+
+   ObjectSetInteger(
+      0,name,
+      OBJPROP_HIDDEN,
+      true);
+}
+
+//==================================================================
+// SET LABEL
+//==================================================================
+
+void SetLabelText(
+   string name,
+   string text)
+{
+   if(ObjectFind(0,name) >= 0)
+   {
+      ObjectSetString(
+         0,
+         name,
+         OBJPROP_TEXT,
+         text);
    }
-
-   ObjectSetInteger(0,name,
-                    OBJPROP_CORNER,
-                    CORNER_LEFT_UPPER);
-
-   ObjectSetInteger(0,name,
-                    OBJPROP_XDISTANCE,x);
-
-   ObjectSetInteger(0,name,
-                    OBJPROP_YDISTANCE,y);
-
-   ObjectSetInteger(0,name,
-                    OBJPROP_XSIZE,width);
-
-   ObjectSetInteger(0,name,
-                    OBJPROP_YSIZE,height);
-
-   ObjectSetInteger(0,name,
-                    OBJPROP_FONTSIZE,10);
-
-   ObjectSetString(0,name,
-                   OBJPROP_TEXT,text);
-
-   ObjectSetString(0,name,
-                   OBJPROP_FONT,"Arial");
-
-   ObjectSetInteger(0,name,
-                    OBJPROP_SELECTABLE,false);
-
-   ObjectSetInteger(0,name,
-                    OBJPROP_HIDDEN,true);
 }
 
-//====================================================================
-// SET LABEL TEXT
-//====================================================================
-
-void SetLabelText(string name,string text)
-{
-   if(ObjectFind(0,name) >= 0)
-      ObjectSetString(0,
-                      name,
-                      OBJPROP_TEXT,
-                      text);
-}
-
-//====================================================================
-// SET BUTTON TEXT
-//====================================================================
-
-void SetButtonText(string name,string text)
-{
-   if(ObjectFind(0,name) >= 0)
-      ObjectSetString(0,
-                      name,
-                      OBJPROP_TEXT,
-                      text);
-}
-
-//====================================================================
-// DELETE DASHBOARD
-//====================================================================
+//==================================================================
+// DELETE INTERFACE
+//==================================================================
 
 void DeleteInterface()
 {
@@ -1688,6 +1902,6 @@ void DeleteInterface()
    ObjectDelete(0,"BWN_EMERGENCY");
 }
 
-//====================================================================
-// END OF PART 3
-//====================================================================
+//==================================================================
+// END OF BWN BOT V2
+//==================================================================
