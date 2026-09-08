@@ -1,0 +1,1247 @@
+//+------------------------------------------------------------------+
+//|                                                   BWN_Bot.mq5    |
+//|                     BWN Automatic M1 Trading Bot                 |
+//+------------------------------------------------------------------+
+#property copyright "BWN Bot"
+#property version   "1.00"
+#property strict
+
+#include <Trade/Trade.mqh>
+
+CTrade trade;
+
+//--- Trading direction
+enum BWN_DIRECTION
+{
+   DIR_NONE = 0,
+   DIR_BUY  = 1,
+   DIR_SELL = -1
+};
+
+//--- Inputs
+input group "=== BWN GENERAL SETTINGS ==="
+input ENUM_TIMEFRAMES SignalTimeframe = PERIOD_M1;
+input double EntryStrength = 55.0;
+input double ReversalStrength = 65.0;
+input double ProfitRetracePercent = 2.0;
+input double SessionProfitTarget = 1000.0;
+
+input group "=== LOT SIZE SETTINGS ==="
+input bool UseAutomaticLot = true;
+input double ManualLotSize = 0.01;
+input double BalanceStep = 10.0;
+input double LotStepPerBalance = 0.01;
+input double MaximumLotSize = 10.0;
+
+input group "=== ACCOUNT EXPOSURE ==="
+input double MaximumMarginPercent = 50.0;
+input int MaximumOpenTrades = 100;
+
+input group "=== PROTECTION ==="
+input double DailyLossLimitPercent = 2.0;
+input double MaximumDrawdownPercent = 5.0;
+input int MaximumConsecutiveLosses = 3;
+input double MaximumSpreadPips = 5.0;
+input int SlippagePoints = 20;
+
+input group "=== IDENTIFICATION ==="
+input ulong MagicNumber = 26090801;
+
+input group "=== STARTUP ==="
+input bool StartTradingOnAttach = false;
+
+//--- Global state
+bool g_trading_enabled = false;
+bool g_session_finished = false;
+
+double g_session_start_balance = 0.0;
+double g_session_start_equity  = 0.0;
+double g_peak_basket_profit    = 0.0;
+
+int g_current_direction = DIR_NONE;
+int g_consecutive_losses = 0;
+
+datetime g_session_start_time = 0;
+
+//--- Button names
+string BTN_START     = "BWN_START_BUTTON";
+string BTN_STOP      = "BWN_STOP_BUTTON";
+string BTN_EMERGENCY = "BWN_EMERGENCY_BUTTON";
+string LBL_STATUS    = "BWN_STATUS_LABEL";
+
+//--- Function declarations
+void CreateControlPanel();
+void UpdateControlPanel();
+void DeleteControlPanel();
+
+void StartBWN();
+void StopBWN();
+void EmergencyStopBWN();
+
+double GetCurrentLotSize();
+double NormalizeLot(double lot);
+
+int GetCurrentDirection();
+double GetBuyStrength();
+double GetSellStrength();
+
+bool IsSpreadAcceptable();
+bool RiskProtectionTriggered();
+
+int CountManagedPositions();
+int CountManagedPositionsByDirection(int direction);
+
+double GetManagedBasketProfit();
+double GetManagedFloatingProfit();
+
+bool OpenTradeDirection(int direction);
+bool CloseAllManagedPositions();
+
+bool CanOpenAnotherTrade(double lot);
+
+void ManageTrading();
+void ManageOpenBasket();
+void CheckForNewEntry();
+void CheckForStrongReversal();
+
+void ResetBasketTracking();
+void StartNewSession();
+
+bool SessionTargetReached();
+double GetTodayClosedProfit();
+double GetCurrentDrawdownPercent();
+
+void RegisterClosedLosses();
+int GetPositionDirection(ulong ticket);
+
+void CreateButton(string name,
+                  string text,
+                  int x,
+                  int y,
+                  int width,
+                  int height);
+
+void CreateLabel(string name,
+                 string text,
+                 int x,
+                 int y);
+
+//+------------------------------------------------------------------+
+//| Expert initialization                                            |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   trade.SetExpertMagicNumber(MagicNumber);
+   trade.SetDeviationInPoints(SlippagePoints);
+   trade.SetAsyncMode(false);
+
+   g_session_start_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   g_session_start_equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+   g_session_start_time    = TimeCurrent();
+
+   g_peak_basket_profit = 0.0;
+   g_current_direction  = DIR_NONE;
+   g_consecutive_losses = 0;
+
+   CreateControlPanel();
+
+   if(StartTradingOnAttach)
+      StartBWN();
+   else
+      StopBWN();
+
+   Print("BWN Bot initialized successfully.");
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization                                          |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   DeleteControlPanel();
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick                                                      |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   UpdateControlPanel();
+
+   RegisterClosedLosses();
+
+   if(!g_trading_enabled)
+      return;
+
+   if(g_session_finished)
+      return;
+
+   ManageTrading();
+}
+
+//+------------------------------------------------------------------+
+//| Chart event                                                      |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id,
+                  const long &lparam,
+                  const double &dparam,
+                  const string &sparam)
+{
+   if(id != CHARTEVENT_OBJECT_CLICK)
+      return;
+
+   if(sparam == BTN_START)
+   {
+      StartBWN();
+   }
+   else if(sparam == BTN_STOP)
+   {
+      StopBWN();
+   }
+   else if(sparam == BTN_EMERGENCY)
+   {
+      EmergencyStopBWN();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Start BWN                                                        |
+//+------------------------------------------------------------------+
+void StartBWN()
+{
+   g_trading_enabled = true;
+   g_session_finished = false;
+
+   g_session_start_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   g_session_start_equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+   g_session_start_time    = TimeCurrent();
+
+   g_peak_basket_profit = 0.0;
+   g_current_direction  = DIR_NONE;
+   g_consecutive_losses = 0;
+
+   Print("BWN Bot STARTED.");
+}
+
+//+------------------------------------------------------------------+
+//| Stop BWN                                                         |
+//+------------------------------------------------------------------+
+void StopBWN()
+{
+   g_trading_enabled = false;
+
+   Print("BWN Bot STOPPED. Existing BWN positions remain under management.");
+}
+
+//+------------------------------------------------------------------+
+//| Emergency stop                                                   |
+//+------------------------------------------------------------------+
+void EmergencyStopBWN()
+{
+   g_trading_enabled = false;
+   CloseAllManagedPositions();
+
+   Print("BWN EMERGENCY STOP activated.");
+}
+
+//+------------------------------------------------------------------+
+//| Main trading manager                                             |
+//+------------------------------------------------------------------+
+void ManageTrading()
+{
+   if(SessionTargetReached())
+   {
+      CloseAllManagedPositions();
+      g_session_finished = true;
+      g_trading_enabled = false;
+
+      Print("BWN $", DoubleToString(SessionProfitTarget,2),
+            " session target reached. Trading stopped.");
+      return;
+   }
+
+   if(RiskProtectionTriggered())
+   {
+      CloseAllManagedPositions();
+      g_trading_enabled = false;
+
+      Print("BWN risk protection triggered. Trading stopped.");
+      return;
+   }
+
+   if(!IsSpreadAcceptable())
+      return;
+
+   if(CountManagedPositions() > 0)
+   {
+      ManageOpenBasket();
+      CheckForStrongReversal();
+   }
+   else
+   {
+      ResetBasketTracking();
+      CheckForNewEntry();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Create control panel                                             |
+//+------------------------------------------------------------------+
+void CreateControlPanel()
+{
+   CreateButton(BTN_START, "BWN START", 10, 20, 120, 35);
+   CreateButton(BTN_STOP, "BWN STOP", 140, 20, 120, 35);
+   CreateButton(BTN_EMERGENCY, "EMERGENCY", 270, 20, 120, 35);
+
+   CreateLabel(LBL_STATUS, "BWN: STOPPED", 10, 65);
+}
+
+//+------------------------------------------------------------------+
+//| Create button                                                    |
+//+------------------------------------------------------------------+
+void CreateButton(string name,
+                  string text,
+                  int x,
+                  int y,
+                  int width,
+                  int height)
+{
+   if(ObjectFind(0,name) >= 0)
+      ObjectDelete(0,name);
+
+   ObjectCreate(0,name,OBJ_BUTTON,0,0,0);
+
+   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+   ObjectSetInteger(0,name,OBJPROP_XSIZE,width);
+   ObjectSetInteger(0,name,OBJPROP_YSIZE,height);
+
+   ObjectSetString(0,name,OBJPROP_TEXT,text);
+   ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,10);
+}
+
+//+------------------------------------------------------------------+
+//| Create label                                                     |
+//+------------------------------------------------------------------+
+void CreateLabel(string name,
+                 string text,
+                 int x,
+                 int y)
+{
+   if(ObjectFind(0,name) >= 0)
+      ObjectDelete(0,name);
+
+   ObjectCreate(0,name,OBJ_LABEL,0,0,0);
+
+   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+   ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,10);
+
+   ObjectSetString(0,name,OBJPROP_TEXT,text);
+}
+
+//+------------------------------------------------------------------+
+//| Update panel                                                     |
+//+------------------------------------------------------------------+
+void UpdateControlPanel()
+{
+   string status;
+
+   if(g_session_finished)
+      status = "BWN: TARGET REACHED";
+   else if(g_trading_enabled)
+      status = "BWN: RUNNING";
+   else
+      status = "BWN: STOPPED";
+
+   ObjectSetString(0,LBL_STATUS,OBJPROP_TEXT,status);
+}
+
+//+------------------------------------------------------------------+
+//| Delete panel                                                     |
+//+------------------------------------------------------------------+
+void DeleteControlPanel()
+{
+   ObjectDelete(0,BTN_START);
+   ObjectDelete(0,BTN_STOP);
+   ObjectDelete(0,BTN_EMERGENCY);
+   ObjectDelete(0,LBL_STATUS);
+}//+------------------------------------------------------------------+
+//| Automatic balance lot calculation                                |
+//+------------------------------------------------------------------+
+double GetCurrentLotSize()
+{
+   if(!UseAutomaticLot)
+      return NormalizeLot(ManualLotSize);
+
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+   if(balance <= 0.0)
+      return NormalizeLot(ManualLotSize);
+
+   double level = MathFloor(balance / BalanceStep);
+
+   double lot = LotStepPerBalance * (level + 1.0);
+
+   if(lot > MaximumLotSize)
+      lot = MaximumLotSize;
+
+   return NormalizeLot(lot);
+}
+
+//+------------------------------------------------------------------+
+//| Normalize lot according to broker                                |
+//+------------------------------------------------------------------+
+double NormalizeLot(double lot)
+{
+   double min_lot = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   double max_lot = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+   double step    = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+
+   if(step <= 0.0)
+      step = 0.01;
+
+   if(lot < min_lot)
+      lot = min_lot;
+
+   if(lot > max_lot)
+      lot = max_lot;
+
+   if(lot > MaximumLotSize)
+      lot = MaximumLotSize;
+
+   lot = MathFloor(lot / step) * step;
+
+   int digits = 2;
+
+   if(step >= 1.0)
+      digits = 0;
+   else if(step >= 0.1)
+      digits = 1;
+   else if(step >= 0.01)
+      digits = 2;
+   else if(step >= 0.001)
+      digits = 3;
+
+   return NormalizeDouble(lot,digits);
+}
+
+//+------------------------------------------------------------------+
+//| Get current M1 direction                                        |
+//+------------------------------------------------------------------+
+int GetCurrentDirection()
+{
+   double buy  = GetBuyStrength();
+   double sell = GetSellStrength();
+
+   if(buy >= EntryStrength && buy > sell)
+      return DIR_BUY;
+
+   if(sell >= EntryStrength && sell > buy)
+      return DIR_SELL;
+
+   return DIR_NONE;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate BUY strength from live candle                          |
+//+------------------------------------------------------------------+
+double GetBuyStrength()
+{
+   MqlRates rates[1];
+
+   if(CopyRates(_Symbol,SignalTimeframe,0,1,rates) != 1)
+      return 50.0;
+
+   double open_price = rates[0].open;
+   double high_price = rates[0].high;
+   double low_price  = rates[0].low;
+
+   double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+
+   if(open_price <= 0.0)
+      return 50.0;
+
+   double range = high_price - low_price;
+
+   if(range <= 0.0)
+      return 50.0;
+
+   double candle_move = bid - open_price;
+
+   double directional_score = candle_move / range;
+
+   if(directional_score > 1.0)
+      directional_score = 1.0;
+
+   if(directional_score < -1.0)
+      directional_score = -1.0;
+
+   double position_score =
+      ((bid - low_price) / range) * 2.0 - 1.0;
+
+   if(position_score > 1.0)
+      position_score = 1.0;
+
+   if(position_score < -1.0)
+      position_score = -1.0;
+
+   double score =
+      50.0 +
+      (directional_score * 25.0) +
+      (position_score * 25.0);
+
+   if(score > 100.0)
+      score = 100.0;
+
+   if(score < 0.0)
+      score = 0.0;
+
+   return score;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate SELL strength                                          |
+//+------------------------------------------------------------------+
+double GetSellStrength()
+{
+   return 100.0 - GetBuyStrength();
+}
+
+//+------------------------------------------------------------------+
+//| Spread check                                                     |
+//+------------------------------------------------------------------+
+bool IsSpreadAcceptable()
+{
+   double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+
+   if(bid <= 0.0 || ask <= 0.0)
+      return false;
+
+   double spread_points = (ask - bid) / _Point;
+
+   double points_per_pip = 1.0;
+
+   if(_Digits == 3 || _Digits == 5)
+      points_per_pip = 10.0;
+
+   double spread_pips = spread_points / points_per_pip;
+
+   if(spread_pips > MaximumSpreadPips)
+      return false;
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Count BWN positions                                              |
+//+------------------------------------------------------------------+
+int CountManagedPositions()
+{
+   int count = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      long magic =
+         PositionGetInteger(POSITION_MAGIC);
+
+      string symbol =
+         PositionGetString(POSITION_SYMBOL);
+
+      if((ulong)magic == MagicNumber &&
+         symbol == _Symbol)
+      {
+         count++;
+      }
+   }
+
+   return count;
+}
+
+//+------------------------------------------------------------------+
+//| Count positions by direction                                     |
+//+------------------------------------------------------------------+
+int CountManagedPositionsByDirection(int direction)
+{
+   int count = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      long magic =
+         PositionGetInteger(POSITION_MAGIC);
+
+      string symbol =
+         PositionGetString(POSITION_SYMBOL);
+
+      if((ulong)magic != MagicNumber ||
+         symbol != _Symbol)
+         continue;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      if(direction == DIR_BUY &&
+         type == POSITION_TYPE_BUY)
+         count++;
+
+      if(direction == DIR_SELL &&
+         type == POSITION_TYPE_SELL)
+         count++;
+   }
+
+   return count;
+}
+
+//+------------------------------------------------------------------+
+//| Get position direction                                           |
+//+------------------------------------------------------------------+
+int GetPositionDirection(ulong ticket)
+{
+   if(!PositionSelectByTicket(ticket))
+      return DIR_NONE;
+
+   ENUM_POSITION_TYPE type =
+      (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+   if(type == POSITION_TYPE_BUY)
+      return DIR_BUY;
+
+   if(type == POSITION_TYPE_SELL)
+      return DIR_SELL;
+
+   return DIR_NONE;
+}
+
+//+------------------------------------------------------------------+
+//| Basket floating profit                                           |
+//+------------------------------------------------------------------+
+double GetManagedBasketProfit()
+{
+   double total = 0.0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      long magic =
+         PositionGetInteger(POSITION_MAGIC);
+
+      string symbol =
+         PositionGetString(POSITION_SYMBOL);
+
+      if((ulong)magic != MagicNumber ||
+         symbol != _Symbol)
+         continue;
+
+      total += PositionGetDouble(POSITION_PROFIT);
+      total += PositionGetDouble(POSITION_SWAP);
+   }
+
+   return total;
+}
+
+//+------------------------------------------------------------------+
+//| Can another trade be opened?                                     |
+//+------------------------------------------------------------------+
+bool CanOpenAnotherTrade(double lot)
+{
+   int positions = CountManagedPositions();
+
+   if(positions >= MaximumOpenTrades)
+      return false;
+
+   double equity =
+      AccountInfoDouble(ACCOUNT_EQUITY);
+
+   double margin =
+      AccountInfoDouble(ACCOUNT_MARGIN);
+
+   double free_margin =
+      AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+
+   if(equity <= 0.0)
+      return false;
+
+   double allowed_margin =
+      equity * MaximumMarginPercent / 100.0;
+
+   if(margin >= allowed_margin)
+      return false;
+
+   double ask =
+      SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+
+   double bid =
+      SymbolInfoDouble(_Symbol,SYMBOL_BID);
+
+   double price = ask;
+
+   if(g_current_direction == DIR_SELL)
+      price = bid;
+
+   ENUM_ORDER_TYPE order_type = ORDER_TYPE_BUY;
+
+   if(g_current_direction == DIR_SELL)
+      order_type = ORDER_TYPE_SELL;
+
+   double required_margin = 0.0;
+
+   if(!OrderCalcMargin(order_type,
+                       _Symbol,
+                       lot,
+                       price,
+                       required_margin))
+   {
+      return false;
+   }
+
+   if(required_margin <= 0.0)
+      return false;
+
+   if(margin + required_margin > allowed_margin)
+      return false;
+
+   if(required_margin > free_margin)
+      return false;
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Open a complete basket                                           |
+//+------------------------------------------------------------------+
+bool OpenTradeDirection(int direction)
+{
+   if(direction != DIR_BUY && direction != DIR_SELL)
+      return false;
+
+   double lot = GetCurrentLotSize();
+
+   if(lot <= 0.0)
+      return false;
+
+   g_current_direction = direction;
+
+   int opened = 0;
+
+   while(CountManagedPositions() < MaximumOpenTrades)
+   {
+      if(!CanOpenAnotherTrade(lot))
+         break;
+
+      bool result = false;
+
+      if(direction == DIR_BUY)
+      {
+         result = trade.Buy(
+            lot,
+            _Symbol,
+            0.0,
+            0.0,
+            0.0,
+            "BWN BUY"
+         );
+      }
+      else
+      {
+         result = trade.Sell(
+            lot,
+            _Symbol,
+            0.0,
+            0.0,
+            0.0,
+            "BWN SELL"
+         );
+      }
+
+      if(!result)
+      {
+         Print("BWN trade failed. Retcode=",
+               trade.ResultRetcode(),
+               " Description=",
+               trade.ResultRetcodeDescription());
+
+         break;
+      }
+
+      opened++;
+
+      if(opened >= MaximumOpenTrades)
+         break;
+   }
+
+   if(opened > 0)
+   {
+      g_peak_basket_profit = 0.0;
+
+      Print("BWN opened ",
+            opened,
+            " trade(s). Direction=",
+            direction == DIR_BUY ? "BUY" : "SELL",
+            " Lot=",
+            DoubleToString(lot,2));
+
+      return true;
+   }
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check new entry                                                  |
+//+------------------------------------------------------------------+
+void CheckForNewEntry()
+{
+   int direction = GetCurrentDirection();
+
+   if(direction == DIR_NONE)
+      return;
+
+   double buy_strength = GetBuyStrength();
+   double sell_strength = GetSellStrength();
+
+   Print("BWN M1 Strength: BUY=",
+         DoubleToString(buy_strength,2),
+         "% SELL=",
+         DoubleToString(sell_strength,2),
+         "%");
+
+   OpenTradeDirection(direction);
+}
+
+//+------------------------------------------------------------------+
+//| Strong reversal check                                            |
+//+------------------------------------------------------------------+
+void CheckForStrongReversal()
+{
+   if(CountManagedPositions() <= 0)
+      return;
+
+   double buy_strength = GetBuyStrength();
+   double sell_strength = GetSellStrength();
+
+   if(g_current_direction == DIR_BUY &&
+      sell_strength >= ReversalStrength)
+   {
+      Print("BWN strong SELL reversal detected at ",
+            DoubleToString(sell_strength,2),
+            "%.");
+
+      CloseAllManagedPositions();
+      ResetBasketTracking();
+
+      g_current_direction = DIR_SELL;
+
+      OpenTradeDirection(DIR_SELL);
+      return;
+   }
+
+   if(g_current_direction == DIR_SELL &&
+      buy_strength >= ReversalStrength)
+   {
+      Print("BWN strong BUY reversal detected at ",
+            DoubleToString(buy_strength,2),
+            "%.");
+
+      CloseAllManagedPositions();
+      ResetBasketTracking();
+
+      g_current_direction = DIR_BUY;
+
+      OpenTradeDirection(DIR_BUY);
+      return;
+   }
+}//+------------------------------------------------------------------+
+//| Manage profitable basket                                         |
+//+------------------------------------------------------------------+
+void ManageOpenBasket()
+{
+   double basket_profit = GetManagedBasketProfit();
+
+   if(basket_profit <= 0.0)
+      return;
+
+   if(basket_profit > g_peak_basket_profit)
+   {
+      g_peak_basket_profit = basket_profit;
+
+      Print("BWN new basket peak profit: $",
+            DoubleToString(g_peak_basket_profit,2));
+   }
+
+   if(g_peak_basket_profit <= 0.0)
+      return;
+
+   double retracement_amount =
+      g_peak_basket_profit *
+      ProfitRetracePercent / 100.0;
+
+   double protection_level =
+      g_peak_basket_profit -
+      retracement_amount;
+
+   if(basket_profit <= protection_level)
+   {
+      Print("BWN basket profit retraced by ",
+            DoubleToString(ProfitRetracePercent,2),
+            "%. Peak=$",
+            DoubleToString(g_peak_basket_profit,2),
+            " Current=$",
+            DoubleToString(basket_profit,2));
+
+      int old_direction = g_current_direction;
+
+      CloseAllManagedPositions();
+
+      ResetBasketTracking();
+
+      // Immediately look at the current forming M1 candle.
+      int new_direction = GetCurrentDirection();
+
+      if(new_direction == DIR_NONE)
+         new_direction = old_direction;
+
+      if(new_direction != DIR_NONE)
+         OpenTradeDirection(new_direction);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Close all BWN positions                                          |
+//+------------------------------------------------------------------+
+bool CloseAllManagedPositions()
+{
+   bool all_closed = true;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      long magic =
+         PositionGetInteger(POSITION_MAGIC);
+
+      string symbol =
+         PositionGetString(POSITION_SYMBOL);
+
+      if((ulong)magic != MagicNumber ||
+         symbol != _Symbol)
+         continue;
+
+      if(!trade.PositionClose(ticket))
+      {
+         all_closed = false;
+
+         Print("BWN failed to close ticket ",
+               ticket,
+               ". Retcode=",
+               trade.ResultRetcode(),
+               " Description=",
+               trade.ResultRetcodeDescription());
+      }
+   }
+
+   return all_closed;
+}
+
+//+------------------------------------------------------------------+
+//| Reset basket tracking                                            |
+//+------------------------------------------------------------------+
+void ResetBasketTracking()
+{
+   g_peak_basket_profit = 0.0;
+   g_current_direction = DIR_NONE;
+}
+
+//+------------------------------------------------------------------+
+//| Session target                                                   |
+//+------------------------------------------------------------------+
+bool SessionTargetReached()
+{
+   double current_equity =
+      AccountInfoDouble(ACCOUNT_EQUITY);
+
+   double session_profit =
+      current_equity - g_session_start_equity;
+
+   if(session_profit >= SessionProfitTarget)
+      return true;
+
+   double today_closed =
+      GetTodayClosedProfit();
+
+   if(today_closed >= SessionProfitTarget)
+      return true;
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Today's closed profit                                            |
+//+------------------------------------------------------------------+
+double GetTodayClosedProfit()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(),dt);
+
+   dt.hour = 0;
+   dt.min  = 0;
+   dt.sec  = 0;
+
+   datetime day_start =
+      StructToTime(dt);
+
+   if(!HistorySelect(day_start,TimeCurrent()))
+      return 0.0;
+
+   double profit = 0.0;
+
+   int total = HistoryDealsTotal();
+
+   for(int i = 0; i < total; i++)
+   {
+      ulong deal_ticket =
+         HistoryDealGetTicket(i);
+
+      if(deal_ticket == 0)
+         continue;
+
+      long magic =
+         HistoryDealGetInteger(
+            deal_ticket,
+            DEAL_MAGIC
+         );
+
+      string symbol =
+         HistoryDealGetString(
+            deal_ticket,
+            DEAL_SYMBOL
+         );
+
+      long entry =
+         HistoryDealGetInteger(
+            deal_ticket,
+            DEAL_ENTRY
+         );
+
+      if((ulong)magic != MagicNumber)
+         continue;
+
+      if(symbol != _Symbol)
+         continue;
+
+      if(entry != DEAL_ENTRY_OUT &&
+         entry != DEAL_ENTRY_OUT_BY &&
+         entry != DEAL_ENTRY_INOUT)
+         continue;
+
+      profit +=
+         HistoryDealGetDouble(
+            deal_ticket,
+            DEAL_PROFIT
+         );
+
+      profit +=
+         HistoryDealGetDouble(
+            deal_ticket,
+            DEAL_SWAP
+         );
+
+      profit +=
+         HistoryDealGetDouble(
+            deal_ticket,
+            DEAL_COMMISSION
+         );
+   }
+
+   return profit;
+}
+
+//+------------------------------------------------------------------+
+//| Current drawdown                                                 |
+//+------------------------------------------------------------------+
+double GetCurrentDrawdownPercent()
+{
+   double start_equity = g_session_start_equity;
+
+   if(start_equity <= 0.0)
+      return 0.0;
+
+   double equity =
+      AccountInfoDouble(ACCOUNT_EQUITY);
+
+   if(equity >= start_equity)
+      return 0.0;
+
+   double loss =
+      start_equity - equity;
+
+   return (loss / start_equity) * 100.0;
+}
+
+//+------------------------------------------------------------------+
+//| Risk protection                                                  |
+//+------------------------------------------------------------------+
+bool RiskProtectionTriggered()
+{
+   double drawdown =
+      GetCurrentDrawdownPercent();
+
+   if(drawdown >= MaximumDrawdownPercent)
+   {
+      Print("BWN maximum drawdown reached: ",
+            DoubleToString(drawdown,2),
+            "%");
+
+      return true;
+   }
+
+   double start_equity =
+      g_session_start_equity;
+
+   if(start_equity > 0.0)
+   {
+      double equity =
+         AccountInfoDouble(ACCOUNT_EQUITY);
+
+      double loss_percent =
+         ((start_equity - equity) /
+          start_equity) * 100.0;
+
+      if(loss_percent >= DailyLossLimitPercent)
+      {
+         Print("BWN daily/session loss limit reached: ",
+               DoubleToString(loss_percent,2),
+               "%");
+
+         return true;
+      }
+   }
+
+   if(g_consecutive_losses >= MaximumConsecutiveLosses)
+   {
+      Print("BWN consecutive-loss protection reached.");
+
+      return true;
+   }
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Register closed losses                                           |
+//+------------------------------------------------------------------+
+void RegisterClosedLosses()
+{
+   static datetime last_check = 0;
+
+   datetime now = TimeCurrent();
+
+   if(now == last_check)
+      return;
+
+   last_check = now;
+
+   datetime from_time = now - 10;
+
+   if(!HistorySelect(from_time,now))
+      return;
+
+   int total = HistoryDealsTotal();
+
+   for(int i = total - 1; i >= 0; i--)
+   {
+      ulong deal =
+         HistoryDealGetTicket(i);
+
+      if(deal == 0)
+         continue;
+
+      long magic =
+         HistoryDealGetInteger(deal,DEAL_MAGIC);
+
+      if((ulong)magic != MagicNumber)
+         continue;
+
+      string symbol =
+         HistoryDealGetString(deal,DEAL_SYMBOL);
+
+      if(symbol != _Symbol)
+         continue;
+
+      long entry =
+         HistoryDealGetInteger(deal,DEAL_ENTRY);
+
+      if(entry != DEAL_ENTRY_OUT &&
+         entry != DEAL_ENTRY_OUT_BY)
+         continue;
+
+      double profit =
+         HistoryDealGetDouble(deal,DEAL_PROFIT);
+
+      if(profit < 0.0)
+      {
+         g_consecutive_losses++;
+      }
+      else if(profit > 0.0)
+      {
+         g_consecutive_losses = 0;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Start a new session                                              |
+//+------------------------------------------------------------------+
+void StartNewSession()
+{
+   g_session_start_balance =
+      AccountInfoDouble(ACCOUNT_BALANCE);
+
+   g_session_start_equity =
+      AccountInfoDouble(ACCOUNT_EQUITY);
+
+   g_session_start_time =
+      TimeCurrent();
+
+   g_peak_basket_profit = 0.0;
+   g_current_direction = DIR_NONE;
+   g_consecutive_losses = 0;
+
+   g_session_finished = false;
+}
+
+//+------------------------------------------------------------------+
+//| END OF BWN BOT                                                   |
+//+------------------------------------------------------------------+
