@@ -1,0 +1,623 @@
+#property strict
+#property version   "1.00"
+#property description "Bry Bot V1 - video-style dynamic basket/grid EA"
+
+#include <Trade/Trade.mqh>
+
+CTrade trade;
+
+input string InpTradeSymbol = "";
+input double InpBaseLot = 0.01;
+input double InpLotMultiplier = 2.0;
+input double InpMaxLotPerOrder = 90.0;
+input int    InpMaxPositions = 100;
+input int    InpGridStepPoints = 500;
+
+input double InpBasketProfitMoney = 10.0;
+input double InpBasketProfitPercent = 0.0;
+
+input double InpMaxMarginUsePercent = 95.0;
+input bool   InpAllowBothDirections = true;
+input bool   InpOpenImmediately = true;
+
+input long   InpMagic = 26092026;
+input int    InpDeviationPoints = 50;
+
+input bool   InpUseDailyLossLimit = true;
+input double InpDailyLossLimitPercent = 2.0;
+
+input bool   InpUseMaxDrawdown = true;
+input double InpMaxDrawdownPercent = 5.0;
+
+input bool   InpEmergencyCloseOnMargin = true;
+input double InpMinimumMarginLevel = 100.0;
+
+string TradeSymbol;
+
+datetime DayStart;
+double DayStartEquity = 0.0;
+double PeakEquity = 0.0;
+
+double LastBuyPrice = 0.0;
+double LastSellPrice = 0.0;
+
+int BuyLevel = 0;
+int SellLevel = 0;
+int LastSignal = 0;
+
+
+string Sym()
+{
+   if(InpTradeSymbol == "")
+      return _Symbol;
+
+   return InpTradeSymbol;
+}
+
+
+double NormalizeVolume(double volume)
+{
+   double minLot = SymbolInfoDouble(TradeSymbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(TradeSymbol, SYMBOL_VOLUME_MAX);
+   double step   = SymbolInfoDouble(TradeSymbol, SYMBOL_VOLUME_STEP);
+
+   if(step <= 0.0)
+      step = minLot;
+
+   if(maxLot <= 0.0)
+      maxLot = InpMaxLotPerOrder;
+
+   maxLot = MathMin(maxLot, InpMaxLotPerOrder);
+
+   volume = MathMax(minLot, MathMin(volume, maxLot));
+
+   volume = MathFloor(volume / step + 1e-9) * step;
+
+   int digits = 0;
+   double temp = step;
+
+   while(temp < 1.0 && digits < 8)
+   {
+      temp *= 10.0;
+      digits++;
+   }
+
+   return NormalizeDouble(volume, digits);
+}
+
+
+double BasketProfit()
+{
+   double total = 0.0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != TradeSymbol)
+         continue;
+
+      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+
+      total += PositionGetDouble(POSITION_PROFIT);
+      total += PositionGetDouble(POSITION_SWAP);
+   }
+
+   return total;
+}
+
+
+int BasketCount()
+{
+   int count = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != TradeSymbol)
+         continue;
+
+      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+
+      count++;
+   }
+
+   return count;
+}
+
+
+double NextLot(int level)
+{
+   double lot = InpBaseLot * MathPow(InpLotMultiplier, level);
+
+   return NormalizeVolume(lot);
+}
+
+
+int CurrentSignal()
+{
+   double openPrice = iOpen(TradeSymbol, PERIOD_CURRENT, 0);
+   double bid = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+
+   if(openPrice <= 0.0 || bid <= 0.0)
+      return 0;
+
+   if(bid > openPrice)
+      return 1;
+
+   if(bid < openPrice)
+      return -1;
+
+   return LastSignal;
+}
+
+
+bool DailyLimitHit()
+{
+   if(!InpUseDailyLossLimit)
+      return false;
+
+   if(DayStartEquity <= 0.0)
+      return false;
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   double lossPercent =
+      (DayStartEquity - equity) /
+      DayStartEquity * 100.0;
+
+   return lossPercent >= InpDailyLossLimitPercent;
+}
+
+
+bool DrawdownHit()
+{
+   if(!InpUseMaxDrawdown)
+      return false;
+
+   if(PeakEquity <= 0.0)
+      return false;
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   double drawdown =
+      (PeakEquity - equity) /
+      PeakEquity * 100.0;
+
+   return drawdown >= InpMaxDrawdownPercent;
+}
+
+
+bool MarginProtectionHit()
+{
+   if(!InpEmergencyCloseOnMargin)
+      return false;
+
+   double margin =
+      AccountInfoDouble(ACCOUNT_MARGIN);
+
+   if(margin <= 0.0)
+      return false;
+
+   double equity =
+      AccountInfoDouble(ACCOUNT_EQUITY);
+
+   double marginLevel =
+      equity / margin * 100.0;
+
+   return marginLevel <= InpMinimumMarginLevel;
+}bool CanOpen(double volume, ENUM_ORDER_TYPE orderType)
+{
+   if(BasketCount() >= InpMaxPositions)
+      return false;
+
+   double equity =
+      AccountInfoDouble(ACCOUNT_EQUITY);
+
+   double margin =
+      AccountInfoDouble(ACCOUNT_MARGIN);
+
+   double freeMargin =
+      AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+
+   if(equity <= 0.0 || freeMargin <= 0.0)
+      return false;
+
+   double estimatedMargin = 0.0;
+
+   double price;
+
+   if(orderType == ORDER_TYPE_BUY)
+      price = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
+   else
+      price = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+
+   if(!OrderCalcMargin(
+      orderType,
+      TradeSymbol,
+      volume,
+      price,
+      estimatedMargin))
+   {
+      return false;
+   }
+
+   double allowedMargin =
+      equity * InpMaxMarginUsePercent / 100.0;
+
+   if(margin + estimatedMargin > allowedMargin)
+      return false;
+
+   if(estimatedMargin >= freeMargin)
+      return false;
+
+   return true;
+}
+
+
+bool OpenBuy(double volume)
+{
+   volume = NormalizeVolume(volume);
+
+   if(!CanOpen(volume, ORDER_TYPE_BUY))
+      return false;
+
+   trade.SetExpertMagicNumber(InpMagic);
+   trade.SetDeviationInPoints(InpDeviationPoints);
+
+   bool result =
+      trade.Buy(
+         volume,
+         TradeSymbol,
+         0.0,
+         0.0,
+         0.0,
+         "Bry BUY"
+      );
+
+   if(result)
+      LastBuyPrice =
+         SymbolInfoDouble(
+            TradeSymbol,
+            SYMBOL_ASK
+         );
+
+   return result;
+}
+
+
+bool OpenSell(double volume)
+{
+   volume = NormalizeVolume(volume);
+
+   if(!CanOpen(volume, ORDER_TYPE_SELL))
+      return false;
+
+   trade.SetExpertMagicNumber(InpMagic);
+   trade.SetDeviationInPoints(InpDeviationPoints);
+
+   bool result =
+      trade.Sell(
+         volume,
+         TradeSymbol,
+         0.0,
+         0.0,
+         0.0,
+         "Bry SELL"
+      );
+
+   if(result)
+      LastSellPrice =
+         SymbolInfoDouble(
+            TradeSymbol,
+            SYMBOL_BID
+         );
+
+   return result;
+}
+
+
+void CloseBasket()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != TradeSymbol)
+         continue;
+
+      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+
+      trade.SetExpertMagicNumber(InpMagic);
+
+      trade.PositionClose(ticket);
+   }
+
+   LastBuyPrice = 0.0;
+   LastSellPrice = 0.0;
+
+   BuyLevel = 0;
+   SellLevel = 0;
+}
+
+
+void ResetDayIfNeeded()
+{
+   MqlDateTime dt;
+
+   TimeToStruct(TimeCurrent(), dt);
+
+   dt.hour = 0;
+   dt.min = 0;
+   dt.sec = 0;
+
+   datetime today =
+      StructToTime(dt);
+
+   if(today != DayStart)
+   {
+      DayStart = today;
+
+      DayStartEquity =
+         AccountInfoDouble(
+            ACCOUNT_EQUITY
+         );
+   }
+}
+
+
+void ManageBasket()
+{
+   int count = BasketCount();
+
+   if(count == 0)
+      return;
+
+   double profit =
+      BasketProfit();
+
+   double equity =
+      AccountInfoDouble(
+         ACCOUNT_EQUITY
+      );
+
+   double target =
+      InpBasketProfitMoney;
+
+   if(InpBasketProfitPercent > 0.0)
+   {
+      double percentageTarget =
+         equity *
+         InpBasketProfitPercent /
+         100.0;
+
+      target =
+         MathMax(
+            target,
+            percentageTarget
+         );
+   }
+
+   if(target > 0.0 && profit >= target)
+   {
+      CloseBasket();
+      return;
+   }
+
+   if(DailyLimitHit())
+   {
+      CloseBasket();
+      return;
+   }
+
+   if(DrawdownHit())
+   {
+      CloseBasket();
+      return;
+   }
+
+   if(MarginProtectionHit())
+   {
+      CloseBasket();
+      return;
+   }
+}void AddPositions()
+{
+   if(BasketCount() >= InpMaxPositions)
+      return;
+
+   double point =
+      SymbolInfoDouble(
+         TradeSymbol,
+         SYMBOL_POINT
+      );
+
+   if(point <= 0.0)
+      return;
+
+   double ask =
+      SymbolInfoDouble(
+         TradeSymbol,
+         SYMBOL_ASK
+      );
+
+   double bid =
+      SymbolInfoDouble(
+         TradeSymbol,
+         SYMBOL_BID
+      );
+
+   int signal = CurrentSignal();
+
+   if(signal == 0)
+      return;
+
+   LastSignal = signal;
+
+
+   if(signal > 0)
+   {
+      if(LastBuyPrice <= 0.0)
+      {
+         if(OpenBuy(NextLot(BuyLevel)))
+            BuyLevel++;
+
+         return;
+      }
+
+      double adverseMove =
+         LastBuyPrice - bid;
+
+      if(adverseMove >=
+         InpGridStepPoints * point)
+      {
+         if(OpenBuy(NextLot(BuyLevel)))
+         {
+            BuyLevel++;
+            LastBuyPrice = ask;
+         }
+      }
+   }
+   else
+   {
+      if(LastSellPrice <= 0.0)
+      {
+         if(OpenSell(NextLot(SellLevel)))
+            SellLevel++;
+
+         return;
+      }
+
+      double adverseMove =
+         ask - LastSellPrice;
+
+      if(adverseMove >=
+         InpGridStepPoints * point)
+      {
+         if(OpenSell(NextLot(SellLevel)))
+         {
+            SellLevel++;
+            LastSellPrice = bid;
+         }
+      }
+   }
+}
+
+
+void StartBasket()
+{
+   if(BasketCount() > 0)
+      return;
+
+   if(DailyLimitHit())
+      return;
+
+   if(DrawdownHit())
+      return;
+
+   int signal =
+      CurrentSignal();
+
+   if(signal == 0)
+      return;
+
+   LastSignal = signal;
+
+   BuyLevel = 0;
+   SellLevel = 0;
+
+   LastBuyPrice = 0.0;
+   LastSellPrice = 0.0;
+
+
+   if(signal > 0)
+   {
+      if(OpenBuy(NextLot(BuyLevel)))
+         BuyLevel++;
+   }
+   else
+   {
+      if(OpenSell(NextLot(SellLevel)))
+         SellLevel++;
+   }
+}
+
+
+int OnInit()
+{
+   TradeSymbol = Sym();
+
+   if(!SymbolSelect(
+      TradeSymbol,
+      true))
+   {
+      return INIT_FAILED;
+   }
+
+   trade.SetExpertMagicNumber(InpMagic);
+   trade.SetDeviationInPoints(
+      InpDeviationPoints
+   );
+
+   DayStart = 0;
+
+   ResetDayIfNeeded();
+
+   PeakEquity =
+      AccountInfoDouble(
+         ACCOUNT_EQUITY
+      );
+
+   return INIT_SUCCEEDED;
+}
+
+
+void OnTick()
+{
+   ResetDayIfNeeded();
+
+   double equity =
+      AccountInfoDouble(
+         ACCOUNT_EQUITY
+      );
+
+   if(equity > PeakEquity)
+      PeakEquity = equity;
+
+
+   ManageBasket();
+
+
+   if(BasketCount() == 0)
+   {
+      if(InpOpenImmediately)
+         StartBasket();
+
+      return;
+   }
+
+
+   AddPositions();
+}
