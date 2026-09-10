@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
-//|                 M1_FLIP_SCALPER_AI_v1.mq5                       |
-//|                 M1 Real-Time Scalping & Flipping                |
+//|              M1_CONFIRM_SCALPER_AI_v2.mq5                       |
+//|              M1 Confirmation Scalping EA                        |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.10"
-#property description "M1-only real-time scalping EA."
+#property version   "2.00"
+#property description "M1-only confirmation scalper with broker-side SL and TP."
 
 #include <Trade/Trade.mqh>
 
@@ -14,23 +14,26 @@ CTrade trade;
 // INPUTS
 //====================================================================
 
-//--- Start / trading
+//--- Trading control
 input bool   StartTradingOnAttach = false;
 input ulong  MagicNumber = 26092026;
 
-//--- Signal strength
+//--- Signal
 input int    SignalThreshold = 70;
-input int    ReversalThreshold = 70;
 
-//--- Dynamic lot
+//--- Dynamic lot sizing
 input double LotMultiplier = 0.001;
 input double MaximumLotSize = 10.0;
 
-//--- Position limits
+//--- SL / TP
+input int    StopLossPoints = 100;
+input int    TakeProfitPoints = 150;
+
+//--- Position control
 input int    MaximumOpenPositions = 1;
 input double MaximumEAExposureLots = 10.0;
 
-//--- Strategy
+//--- M1 strategy
 input int    StructureLookback = 5;
 input int    BreakoutLookback = 5;
 input double MinimumBodyPercent = 55.0;
@@ -54,7 +57,7 @@ double PeakEquity = 0.0;
 
 int ConsecutiveLosses = 0;
 
-ulong LastProcessedDealTicket = 0;
+int LastTradingDay = -1;
 
 //====================================================================
 // FUNCTION DECLARATIONS
@@ -67,10 +70,10 @@ void UpdateButtonState();
 void UpdateDailyStatistics();
 void ResetDailyStatisticsIfNeeded();
 
-bool CanTrade();
 bool DailyLossProtection();
 bool DrawdownProtection();
 bool ConsecutiveLossProtection();
+bool CanTrade();
 
 double NormalizeLot(double lot);
 double CalculateDynamicLot();
@@ -97,13 +100,12 @@ bool GetCurrentSignal(int &signal,
 bool OpenBuy();
 bool OpenSell();
 
-bool ClosePositionByTicket(ulong ticket);
-
-void CheckPositionsAndFlip();
 void CheckForNewEntry();
 
-void InitializeHistoryTracker();
-void UpdateConsecutiveLosses();
+void UpdateConsecutiveLossesFromDeal(
+   ulong dealTicket);
+
+void ShowStatus();
 
 string SignalText(int signal);
 
@@ -116,13 +118,18 @@ int OnInit()
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(SlippagePoints);
 
-   DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-   PeakEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   DayStartBalance =
+      AccountInfoDouble(ACCOUNT_BALANCE);
+
+   PeakEquity =
+      AccountInfoDouble(ACCOUNT_EQUITY);
 
    ConsecutiveLosses = 0;
 
-   // Ignore historical trades that existed before this EA started.
-   InitializeHistoryTracker();
+   MqlDateTime currentTime;
+   TimeToStruct(TimeCurrent(),currentTime);
+
+   LastTradingDay = currentTime.day;
 
    TradingEnabled = StartTradingOnAttach;
 
@@ -130,11 +137,14 @@ int OnInit()
    UpdateButtonState();
 
    Print("========================================");
-   Print("M1 FLIP SCALPER AI v1.10");
+   Print("M1 CONFIRM SCALPER AI v2.00");
    Print("Symbol: ",_Symbol);
    Print("Timeframe: M1 ONLY");
-   Print("Trading: ",TradingEnabled ? "ON" : "OFF");
-   Print("Consecutive losses reset for this session.");
+   Print("Trading: ",
+         TradingEnabled ? "STARTED" : "STOPPED");
+   Print("One trade at a time.");
+   Print("SL and TP are attached to every entry.");
+   Print("No automatic flipping.");
    Print("========================================");
 
    return(INIT_SUCCEEDED);
@@ -158,93 +168,175 @@ void OnTick()
 {
    UpdateDailyStatistics();
    ResetDailyStatisticsIfNeeded();
-   UpdateConsecutiveLosses();
+
+   ShowStatus();
 
    if(!TradingEnabled)
       return;
 
-   // Existing trades are monitored continuously.
-   CheckPositionsAndFlip();
-
-   // New entries are checked continuously.
+   // Existing positions are NOT modified here.
+   // They remain open until broker-side SL or TP.
    CheckForNewEntry();
+}
+
+//====================================================================
+// TRADE TRANSACTION
+//====================================================================
+
+void OnTradeTransaction(
+   const MqlTradeTransaction &trans,
+   const MqlTradeRequest &request,
+   const MqlTradeResult &result)
+{
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD)
+      return;
+
+   if(trans.deal == 0)
+      return;
+
+   UpdateConsecutiveLossesFromDeal(trans.deal);
 }
 
 //====================================================================
 // CHART BUTTON EVENTS
 //====================================================================
 
-void OnChartEvent(const int id,
-                  const long &lparam,
-                  const double &dparam,
-                  const string &sparam)
+void OnChartEvent(
+   const int id,
+   const long &lparam,
+   const double &dparam,
+   const string &sparam)
 {
    if(id != CHARTEVENT_OBJECT_CLICK)
       return;
 
-   if(sparam == "M1FLIP_START")
+   if(sparam == "M1CS_START")
    {
       TradingEnabled = true;
+
       UpdateButtonState();
 
-      Print("M1 FLIP SCALPER: STARTED.");
+      Print("M1 CONFIRM SCALPER: STARTED.");
    }
 
-   if(sparam == "M1FLIP_STOP")
+   if(sparam == "M1CS_STOP")
    {
       TradingEnabled = false;
+
       UpdateButtonState();
 
-      Print("M1 FLIP SCALPER: NEW ENTRIES STOPPED.");
+      Print("M1 CONFIRM SCALPER: NEW ENTRIES STOPPED.");
    }
 }
 
 //====================================================================
-// BUTTONS
+// CREATE BUTTONS
 //====================================================================
 
 void CreateControlButtons()
 {
-   ObjectCreate(0,"M1FLIP_START",OBJ_BUTTON,0,0,0);
+   ObjectCreate(
+      0,
+      "M1CS_START",
+      OBJ_BUTTON,
+      0,
+      0,
+      0
+   );
 
-   ObjectSetInteger(0,"M1FLIP_START",
-                    OBJPROP_CORNER,CORNER_LEFT_UPPER);
+   ObjectSetInteger(
+      0,
+      "M1CS_START",
+      OBJPROP_CORNER,
+      CORNER_LEFT_UPPER
+   );
 
-   ObjectSetInteger(0,"M1FLIP_START",
-                    OBJPROP_XDISTANCE,10);
+   ObjectSetInteger(
+      0,
+      "M1CS_START",
+      OBJPROP_XDISTANCE,
+      10
+   );
 
-   ObjectSetInteger(0,"M1FLIP_START",
-                    OBJPROP_YDISTANCE,20);
+   ObjectSetInteger(
+      0,
+      "M1CS_START",
+      OBJPROP_YDISTANCE,
+      20
+   );
 
-   ObjectSetInteger(0,"M1FLIP_START",
-                    OBJPROP_XSIZE,100);
+   ObjectSetInteger(
+      0,
+      "M1CS_START",
+      OBJPROP_XSIZE,
+      100
+   );
 
-   ObjectSetInteger(0,"M1FLIP_START",
-                    OBJPROP_YSIZE,30);
+   ObjectSetInteger(
+      0,
+      "M1CS_START",
+      OBJPROP_YSIZE,
+      30
+   );
 
-   ObjectSetString(0,"M1FLIP_START",
-                   OBJPROP_TEXT,"START");
+   ObjectSetString(
+      0,
+      "M1CS_START",
+      OBJPROP_TEXT,
+      "START"
+   );
 
 
-   ObjectCreate(0,"M1FLIP_STOP",OBJ_BUTTON,0,0,0);
+   ObjectCreate(
+      0,
+      "M1CS_STOP",
+      OBJ_BUTTON,
+      0,
+      0,
+      0
+   );
 
-   ObjectSetInteger(0,"M1FLIP_STOP",
-                    OBJPROP_CORNER,CORNER_LEFT_UPPER);
+   ObjectSetInteger(
+      0,
+      "M1CS_STOP",
+      OBJPROP_CORNER,
+      CORNER_LEFT_UPPER
+   );
 
-   ObjectSetInteger(0,"M1FLIP_STOP",
-                    OBJPROP_XDISTANCE,120);
+   ObjectSetInteger(
+      0,
+      "M1CS_STOP",
+      OBJPROP_XDISTANCE,
+      120
+   );
 
-   ObjectSetInteger(0,"M1FLIP_STOP",
-                    OBJPROP_YDISTANCE,20);
+   ObjectSetInteger(
+      0,
+      "M1CS_STOP",
+      OBJPROP_YDISTANCE,
+      20
+   );
 
-   ObjectSetInteger(0,"M1FLIP_STOP",
-                    OBJPROP_XSIZE,100);
+   ObjectSetInteger(
+      0,
+      "M1CS_STOP",
+      OBJPROP_XSIZE,
+      100
+   );
 
-   ObjectSetInteger(0,"M1FLIP_STOP",
-                    OBJPROP_YSIZE,30);
+   ObjectSetInteger(
+      0,
+      "M1CS_STOP",
+      OBJPROP_YSIZE,
+      30
+   );
 
-   ObjectSetString(0,"M1FLIP_STOP",
-                   OBJPROP_TEXT,"STOP");
+   ObjectSetString(
+      0,
+      "M1CS_STOP",
+      OBJPROP_TEXT,
+      "STOP"
+   );
 }
 
 //====================================================================
@@ -253,15 +345,24 @@ void CreateControlButtons()
 
 void DeleteControlButtons()
 {
-   ObjectDelete(0,"M1FLIP_START");
-   ObjectDelete(0,"M1FLIP_STOP");
+   ObjectDelete(0,"M1CS_START");
+   ObjectDelete(0,"M1CS_STOP");
 }
 
 //====================================================================
-// STATUS DISPLAY
+// BUTTON STATUS
 //====================================================================
 
 void UpdateButtonState()
+{
+   ShowStatus();
+}
+
+//====================================================================
+// STATUS
+//====================================================================
+
+void ShowStatus()
 {
    string status;
 
@@ -270,13 +371,21 @@ void UpdateButtonState()
    else
       status = "STOPPED";
 
+   int positions =
+      CountEAOpenPositions();
+
    Comment(
-      "M1 FLIP SCALPER AI v1.10\n",
+      "M1 CONFIRM SCALPER AI v2.00\n",
       "Symbol: ",_Symbol,"\n",
-      "Timeframe: M1\n",
+      "Timeframe: M1 ONLY\n",
       "Status: ",status,"\n",
+      "Open positions: ",positions,"\n",
       "Consecutive losses: ",
-      ConsecutiveLosses
+      ConsecutiveLosses,"\n",
+      "Signal threshold: ",
+      SignalThreshold,"\n",
+      "SL points: ",StopLossPoints,"\n",
+      "TP points: ",TakeProfitPoints
    );
 }
 
@@ -299,32 +408,38 @@ string SignalText(int signal)
 
 void UpdateDailyStatistics()
 {
-   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double equity =
+      AccountInfoDouble(ACCOUNT_EQUITY);
 
    if(equity > PeakEquity)
       PeakEquity = equity;
 }
 
 //====================================================================
-// RESET DAILY STATISTICS
+// DAILY RESET
 //====================================================================
 
 void ResetDailyStatisticsIfNeeded()
 {
-   static int savedDay = -1;
-
    MqlDateTime currentTime;
-   TimeToStruct(TimeCurrent(),currentTime);
 
-   if(savedDay == -1)
+   TimeToStruct(
+      TimeCurrent(),
+      currentTime
+   );
+
+   if(LastTradingDay == -1)
    {
-      savedDay = currentTime.day;
+      LastTradingDay =
+         currentTime.day;
+
       return;
    }
 
-   if(currentTime.day != savedDay)
+   if(currentTime.day != LastTradingDay)
    {
-      savedDay = currentTime.day;
+      LastTradingDay =
+         currentTime.day;
 
       DayStartBalance =
          AccountInfoDouble(ACCOUNT_BALANCE);
@@ -334,8 +449,8 @@ void ResetDailyStatisticsIfNeeded()
 
       ConsecutiveLosses = 0;
 
-      Print("New trading day.");
-      Print("Daily statistics reset.");
+      Print("New trading day detected.");
+      Print("Daily protection reset.");
    }
 }
 
@@ -360,7 +475,9 @@ bool DailyLossProtection()
 
    if(lossPercent >= DailyLossLimitPercent)
    {
-      Print("Daily loss protection BLOCKED trading.");
+      Print(
+         "Daily loss protection BLOCKED new trade."
+      );
 
       return false;
    }
@@ -369,7 +486,7 @@ bool DailyLossProtection()
 }
 
 //====================================================================
-// MAXIMUM DRAWDOWN PROTECTION
+// DRAWDOWN PROTECTION
 //====================================================================
 
 bool DrawdownProtection()
@@ -387,9 +504,12 @@ bool DrawdownProtection()
       ((PeakEquity - equity) /
        PeakEquity) * 100.0;
 
-   if(drawdownPercent >= MaximumDrawdownPercent)
+   if(drawdownPercent >=
+      MaximumDrawdownPercent)
    {
-      Print("Maximum drawdown protection BLOCKED trading.");
+      Print(
+         "Maximum drawdown protection BLOCKED new trade."
+      );
 
       return false;
    }
@@ -406,10 +526,13 @@ bool ConsecutiveLossProtection()
    if(MaximumConsecutiveLosses <= 0)
       return true;
 
-   if(ConsecutiveLosses >= MaximumConsecutiveLosses)
+   if(ConsecutiveLosses >=
+      MaximumConsecutiveLosses)
    {
-      Print("Maximum consecutive losses reached: ",
-            ConsecutiveLosses);
+      Print(
+         "Maximum consecutive losses reached: ",
+         ConsecutiveLosses
+      );
 
       return false;
    }
@@ -423,11 +546,17 @@ bool ConsecutiveLossProtection()
 
 bool CanTrade()
 {
-   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+   if(!TerminalInfoInteger(
+         TERMINAL_TRADE_ALLOWED))
+   {
       return false;
+   }
 
-   if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
+   if(!MQLInfoInteger(
+         MQL_TRADE_ALLOWED))
+   {
       return false;
+   }
 
    if(!DailyLossProtection())
       return false;
@@ -448,13 +577,22 @@ bool CanTrade()
 double NormalizeLot(double lot)
 {
    double minimumLot =
-      SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_VOLUME_MIN
+      );
 
    double maximumLot =
-      SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_VOLUME_MAX
+      );
 
    double step =
-      SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_VOLUME_STEP
+      );
 
    if(step <= 0.0)
       step = 0.01;
@@ -468,7 +606,8 @@ double NormalizeLot(double lot)
    if(lot > MaximumLotSize)
       lot = MaximumLotSize;
 
-   lot = MathFloor(lot / step) * step;
+   lot =
+      MathFloor(lot / step) * step;
 
    if(lot < minimumLot)
       lot = minimumLot;
@@ -499,9 +638,12 @@ int CountEAOpenPositions()
 {
    int count = 0;
 
-   int total = PositionsTotal();
+   int total =
+      PositionsTotal();
 
-   for(int i = total - 1; i >= 0; i--)
+   for(int i = total - 1;
+       i >= 0;
+       i--)
    {
       ulong ticket =
          PositionGetTicket(i);
@@ -513,10 +655,14 @@ int CountEAOpenPositions()
          continue;
 
       string symbol =
-         PositionGetString(POSITION_SYMBOL);
+         PositionGetString(
+            POSITION_SYMBOL
+         );
 
       long magic =
-         PositionGetInteger(POSITION_MAGIC);
+         PositionGetInteger(
+            POSITION_MAGIC
+         );
 
       if(symbol == _Symbol &&
          (ulong)magic == MagicNumber)
@@ -536,9 +682,12 @@ double GetEAExposureLots()
 {
    double exposure = 0.0;
 
-   int total = PositionsTotal();
+   int total =
+      PositionsTotal();
 
-   for(int i = total - 1; i >= 0; i--)
+   for(int i = total - 1;
+       i >= 0;
+       i--)
    {
       ulong ticket =
          PositionGetTicket(i);
@@ -550,16 +699,22 @@ double GetEAExposureLots()
          continue;
 
       string symbol =
-         PositionGetString(POSITION_SYMBOL);
+         PositionGetString(
+            POSITION_SYMBOL
+         );
 
       long magic =
-         PositionGetInteger(POSITION_MAGIC);
+         PositionGetInteger(
+            POSITION_MAGIC
+         );
 
       if(symbol == _Symbol &&
          (ulong)magic == MagicNumber)
       {
          exposure +=
-            PositionGetDouble(POSITION_VOLUME);
+            PositionGetDouble(
+               POSITION_VOLUME
+            );
       }
    }
 
@@ -570,7 +725,9 @@ double GetEAExposureLots()
 // HIGHEST HIGH
 //====================================================================
 
-double GetHighestHigh(int startShift,int count)
+double GetHighestHigh(
+   int startShift,
+   int count)
 {
    double highest = -DBL_MAX;
 
@@ -579,7 +736,11 @@ double GetHighestHigh(int startShift,int count)
        i++)
    {
       double high =
-         iHigh(_Symbol,PERIOD_M1,i);
+         iHigh(
+            _Symbol,
+            PERIOD_M1,
+            i
+         );
 
       if(high > highest)
          highest = high;
@@ -592,7 +753,9 @@ double GetHighestHigh(int startShift,int count)
 // LOWEST LOW
 //====================================================================
 
-double GetLowestLow(int startShift,int count)
+double GetLowestLow(
+   int startShift,
+   int count)
 {
    double lowest = DBL_MAX;
 
@@ -601,7 +764,11 @@ double GetLowestLow(int startShift,int count)
        i++)
    {
       double low =
-         iLow(_Symbol,PERIOD_M1,i);
+         iLow(
+            _Symbol,
+            PERIOD_M1,
+            i
+         );
 
       if(low < lowest)
          lowest = low;
@@ -619,14 +786,22 @@ bool IsBullishStructure()
    if(Bars(_Symbol,PERIOD_M1) < 20)
       return false;
 
-   double high1 = iHigh(_Symbol,PERIOD_M1,1);
-   double high2 = iHigh(_Symbol,PERIOD_M1,2);
+   double high1 =
+      iHigh(_Symbol,PERIOD_M1,1);
 
-   double low1 = iLow(_Symbol,PERIOD_M1,1);
-   double low2 = iLow(_Symbol,PERIOD_M1,2);
+   double high2 =
+      iHigh(_Symbol,PERIOD_M1,2);
 
-   return(high1 > high2 &&
-          low1 > low2);
+   double low1 =
+      iLow(_Symbol,PERIOD_M1,1);
+
+   double low2 =
+      iLow(_Symbol,PERIOD_M1,2);
+
+   return(
+      high1 > high2 &&
+      low1 > low2
+   );
 }
 
 //====================================================================
@@ -638,18 +813,26 @@ bool IsBearishStructure()
    if(Bars(_Symbol,PERIOD_M1) < 20)
       return false;
 
-   double high1 = iHigh(_Symbol,PERIOD_M1,1);
-   double high2 = iHigh(_Symbol,PERIOD_M1,2);
+   double high1 =
+      iHigh(_Symbol,PERIOD_M1,1);
 
-   double low1 = iLow(_Symbol,PERIOD_M1,1);
-   double low2 = iLow(_Symbol,PERIOD_M1,2);
+   double high2 =
+      iHigh(_Symbol,PERIOD_M1,2);
 
-   return(high1 < high2 &&
-          low1 < low2);
+   double low1 =
+      iLow(_Symbol,PERIOD_M1,1);
+
+   double low2 =
+      iLow(_Symbol,PERIOD_M1,2);
+
+   return(
+      high1 < high2 &&
+      low1 < low2
+   );
 }
 
 //====================================================================
-// BULLISH CURRENT CANDLE MOMENTUM
+// BULLISH MOMENTUM
 //====================================================================
 
 bool BullishMomentum()
@@ -664,9 +847,13 @@ bool BullishMomentum()
       iLow(_Symbol,PERIOD_M1,0);
 
    double bid =
-      SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_BID
+      );
 
-   double range = high - low;
+   double range =
+      high - low;
 
    if(range <= 0.0)
       return false;
@@ -680,11 +867,14 @@ bool BullishMomentum()
    double bodyPercent =
       (body / range) * 100.0;
 
-   return(bodyPercent >= MinimumBodyPercent);
+   return(
+      bodyPercent >=
+      MinimumBodyPercent
+   );
 }
 
 //====================================================================
-// BEARISH CURRENT CANDLE MOMENTUM
+// BEARISH MOMENTUM
 //====================================================================
 
 bool BearishMomentum()
@@ -699,9 +889,13 @@ bool BearishMomentum()
       iLow(_Symbol,PERIOD_M1,0);
 
    double ask =
-      SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_ASK
+      );
 
-   double range = high - low;
+   double range =
+      high - low;
 
    if(range <= 0.0)
       return false;
@@ -715,7 +909,10 @@ bool BearishMomentum()
    double bodyPercent =
       (body / range) * 100.0;
 
-   return(bodyPercent >= MinimumBodyPercent);
+   return(
+      bodyPercent >=
+      MinimumBodyPercent
+   );
 }
 
 //====================================================================
@@ -725,12 +922,20 @@ bool BearishMomentum()
 bool BullishBreakout()
 {
    double ask =
-      SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_ASK
+      );
 
    double previousHigh =
-      GetHighestHigh(1,BreakoutLookback);
+      GetHighestHigh(
+         1,
+         BreakoutLookback
+      );
 
-   return(ask > previousHigh);
+   return(
+      ask > previousHigh
+   );
 }
 
 //====================================================================
@@ -740,19 +945,28 @@ bool BullishBreakout()
 bool BearishBreakout()
 {
    double bid =
-      SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_BID
+      );
 
    double previousLow =
-      GetLowestLow(1,BreakoutLookback);
+      GetLowestLow(
+         1,
+         BreakoutLookback
+      );
 
-   return(bid < previousLow);
+   return(
+      bid < previousLow
+   );
 }//====================================================================
-// AI-STYLE M1 SIGNAL SCORE
+// M1 CONFIRMATION SCORE
 //====================================================================
 
-bool GetCurrentSignal(int &signal,
-                      double &buyScore,
-                      double &sellScore)
+bool GetCurrentSignal(
+   int &signal,
+   double &buyScore,
+   double &sellScore)
 {
    signal = 0;
    buyScore = 0.0;
@@ -775,7 +989,10 @@ bool GetCurrentSignal(int &signal,
       buyScore += 25.0;
 
    double bid =
-      SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_BID
+      );
 
    double open =
       iOpen(_Symbol,PERIOD_M1,0);
@@ -797,13 +1014,16 @@ bool GetCurrentSignal(int &signal,
       sellScore += 25.0;
 
    double ask =
-      SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_ASK
+      );
 
    if(ask < open)
       sellScore += 15.0;
 
    //===============================================================
-   // FINAL DECISION
+   // FINAL SIGNAL
    //===============================================================
 
    if(buyScore >= SignalThreshold &&
@@ -824,7 +1044,7 @@ bool GetCurrentSignal(int &signal,
 }
 
 //====================================================================
-// OPEN BUY
+// OPEN BUY WITH SL AND TP
 //====================================================================
 
 bool OpenBuy()
@@ -834,7 +1054,9 @@ bool OpenBuy()
 
    if(CountEAOpenPositions() >=
       MaximumOpenPositions)
+   {
       return false;
+   }
 
    double lot =
       CalculateDynamicLot();
@@ -850,37 +1072,101 @@ bool OpenBuy()
       if(exposure + lot >
          MaximumEAExposureLots)
       {
-         Print("BUY blocked by exposure limit.");
+         Print(
+            "BUY blocked by exposure limit."
+         );
+
          return false;
       }
    }
+
+   MqlTick tick;
+
+   if(!SymbolInfoTick(_Symbol,tick))
+      return false;
+
+   double point =
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_POINT
+      );
+
+   int digits =
+      (int)SymbolInfoInteger(
+         _Symbol,
+         SYMBOL_DIGITS
+      );
+
+   if(point <= 0.0)
+      return false;
+
+   int brokerStopLevel =
+      (int)SymbolInfoInteger(
+         _Symbol,
+         SYMBOL_TRADE_STOPS_LEVEL
+      );
+
+   double minimumDistance =
+      brokerStopLevel * point;
+
+   double slDistance =
+      StopLossPoints * point;
+
+   double tpDistance =
+      TakeProfitPoints * point;
+
+   if(slDistance < minimumDistance)
+      slDistance = minimumDistance;
+
+   if(tpDistance < minimumDistance)
+      tpDistance = minimumDistance;
+
+   double sl =
+      NormalizeDouble(
+         tick.ask - slDistance,
+         digits
+      );
+
+   double tp =
+      NormalizeDouble(
+         tick.ask + tpDistance,
+         digits
+      );
 
    bool result =
       trade.Buy(
          lot,
          _Symbol,
          0.0,
-         0.0,
-         0.0,
-         "M1 FLIP BUY"
+         sl,
+         tp,
+         "M1 CONFIRM BUY"
       );
 
    if(result)
    {
-      Print("BUY OPENED. Lot = ",
-            DoubleToString(lot,2));
+      Print(
+         "BUY OPENED | Lot=",
+         DoubleToString(lot,2),
+         " | SL=",
+         DoubleToString(sl,digits),
+         " | TP=",
+         DoubleToString(tp,digits)
+      );
 
       return true;
    }
 
-   Print("BUY failed: ",
-         trade.ResultRetcodeDescription());
+   Print(
+      "BUY failed: ",
+      trade.ResultRetcodeDescription()
+   );
 
    return false;
 }
 
 //====================================================================
-// OPEN SELL
+// OPEN SELL WITH SL AND TP
 //====================================================================
 
 bool OpenSell()
@@ -890,7 +1176,9 @@ bool OpenSell()
 
    if(CountEAOpenPositions() >=
       MaximumOpenPositions)
+   {
       return false;
+   }
 
    double lot =
       CalculateDynamicLot();
@@ -906,165 +1194,114 @@ bool OpenSell()
       if(exposure + lot >
          MaximumEAExposureLots)
       {
-         Print("SELL blocked by exposure limit.");
+         Print(
+            "SELL blocked by exposure limit."
+         );
+
          return false;
       }
    }
+
+   MqlTick tick;
+
+   if(!SymbolInfoTick(_Symbol,tick))
+      return false;
+
+   double point =
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_POINT
+      );
+
+   int digits =
+      (int)SymbolInfoInteger(
+         _Symbol,
+         SYMBOL_DIGITS
+      );
+
+   if(point <= 0.0)
+      return false;
+
+   int brokerStopLevel =
+      (int)SymbolInfoInteger(
+         _Symbol,
+         SYMBOL_TRADE_STOPS_LEVEL
+      );
+
+   double minimumDistance =
+      brokerStopLevel * point;
+
+   double slDistance =
+      StopLossPoints * point;
+
+   double tpDistance =
+      TakeProfitPoints * point;
+
+   if(slDistance < minimumDistance)
+      slDistance = minimumDistance;
+
+   if(tpDistance < minimumDistance)
+      tpDistance = minimumDistance;
+
+   double sl =
+      NormalizeDouble(
+         tick.bid + slDistance,
+         digits
+      );
+
+   double tp =
+      NormalizeDouble(
+         tick.bid - tpDistance,
+         digits
+      );
 
    bool result =
       trade.Sell(
          lot,
          _Symbol,
          0.0,
-         0.0,
-         0.0,
-         "M1 FLIP SELL"
+         sl,
+         tp,
+         "M1 CONFIRM SELL"
       );
 
    if(result)
    {
-      Print("SELL OPENED. Lot = ",
-            DoubleToString(lot,2));
+      Print(
+         "SELL OPENED | Lot=",
+         DoubleToString(lot,2),
+         " | SL=",
+         DoubleToString(sl,digits),
+         " | TP=",
+         DoubleToString(tp,digits)
+      );
 
       return true;
    }
 
-   Print("SELL failed: ",
-         trade.ResultRetcodeDescription());
+   Print(
+      "SELL failed: ",
+      trade.ResultRetcodeDescription()
+   );
 
    return false;
 }
 
 //====================================================================
-// CLOSE POSITION
-//====================================================================
-
-bool ClosePositionByTicket(ulong ticket)
-{
-   if(!PositionSelectByTicket(ticket))
-      return false;
-
-   bool result =
-      trade.PositionClose(ticket);
-
-   if(!result)
-   {
-      Print("Close failed. Ticket ",
-            ticket,
-            " : ",
-            trade.ResultRetcodeDescription());
-
-      return false;
-   }
-
-   return true;
-}
-
-//====================================================================
-// CHECK POSITIONS AND FLIP
-//====================================================================
-
-void CheckPositionsAndFlip()
-{
-   int signal;
-
-   double buyScore;
-   double sellScore;
-
-   if(!GetCurrentSignal(
-         signal,
-         buyScore,
-         sellScore))
-   {
-      return;
-   }
-
-   int total =
-      PositionsTotal();
-
-   for(int i = total - 1;
-       i >= 0;
-       i--)
-   {
-      ulong ticket =
-         PositionGetTicket(i);
-
-      if(ticket == 0)
-         continue;
-
-      if(!PositionSelectByTicket(ticket))
-         continue;
-
-      string symbol =
-         PositionGetString(POSITION_SYMBOL);
-
-      long magic =
-         PositionGetInteger(POSITION_MAGIC);
-
-      if(symbol != _Symbol ||
-         (ulong)magic != MagicNumber)
-         continue;
-
-      ENUM_POSITION_TYPE type =
-         (ENUM_POSITION_TYPE)
-         PositionGetInteger(POSITION_TYPE);
-
-      //============================================================
-      // BUY -> SELL
-      //============================================================
-
-      if(type == POSITION_TYPE_BUY &&
-         signal == -1 &&
-         sellScore >= ReversalThreshold)
-      {
-         Print("SELL reversal detected.");
-         Print("BUY score = ",
-               DoubleToString(buyScore,1),
-               " | SELL score = ",
-               DoubleToString(sellScore,1));
-
-         if(ClosePositionByTicket(ticket))
-         {
-            if(CountEAOpenPositions() == 0)
-               OpenSell();
-         }
-
-         continue;
-      }
-
-      //============================================================
-      // SELL -> BUY
-      //============================================================
-
-      if(type == POSITION_TYPE_SELL &&
-         signal == 1 &&
-         buyScore >= ReversalThreshold)
-      {
-         Print("BUY reversal detected.");
-         Print("BUY score = ",
-               DoubleToString(buyScore,1),
-               " | SELL score = ",
-               DoubleToString(sellScore,1));
-
-         if(ClosePositionByTicket(ticket))
-         {
-            if(CountEAOpenPositions() == 0)
-               OpenBuy();
-         }
-
-         continue;
-      }
-   }
-}
-
-//====================================================================
-// CHECK NEW ENTRY
+// NEW ENTRY CHECK
 //====================================================================
 
 void CheckForNewEntry()
 {
-   if(CountEAOpenPositions() > 0)
+   //===============================================================
+   // NEVER OPEN ANOTHER TRADE WHILE ONE IS ACTIVE
+   //===============================================================
+
+   if(CountEAOpenPositions() >=
+      MaximumOpenPositions)
+   {
       return;
+   }
 
    if(!CanTrade())
       return;
@@ -1082,182 +1319,124 @@ void CheckForNewEntry()
       return;
    }
 
+   //===============================================================
+   // BUY CONFIRMATION
+   //===============================================================
+
    if(signal == 1 &&
       buyScore >= SignalThreshold)
    {
+      Print(
+         "NEW BUY CONFIRMATION. Score=",
+         DoubleToString(buyScore,1)
+      );
+
       OpenBuy();
+
       return;
    }
+
+   //===============================================================
+   // SELL CONFIRMATION
+   //===============================================================
 
    if(signal == -1 &&
       sellScore >= SignalThreshold)
    {
+      Print(
+         "NEW SELL CONFIRMATION. Score=",
+         DoubleToString(sellScore,1)
+      );
+
       OpenSell();
+
       return;
    }
 }
 
 //====================================================================
-// INITIALIZE HISTORY TRACKER
+// CONSECUTIVE LOSS TRACKING
 //====================================================================
 
-void InitializeHistoryTracker()
+void UpdateConsecutiveLossesFromDeal(
+   ulong dealTicket)
 {
-   LastProcessedDealTicket = 0;
-
-   datetime fromTime =
-      TimeCurrent() - 86400;
-
-   datetime toTime =
-      TimeCurrent();
-
-   if(!HistorySelect(fromTime,toTime))
+   if(!HistoryDealSelect(dealTicket))
       return;
 
-   int total =
-      HistoryDealsTotal();
+   string symbol =
+      HistoryDealGetString(
+         dealTicket,
+         DEAL_SYMBOL
+      );
 
-   for(int i = total - 1;
-       i >= 0;
-       i--)
-   {
-      ulong ticket =
-         HistoryDealGetTicket(i);
+   long magic =
+      HistoryDealGetInteger(
+         dealTicket,
+         DEAL_MAGIC
+      );
 
-      if(ticket == 0)
-         continue;
-
-      string symbol =
-         HistoryDealGetString(
-            ticket,
-            DEAL_SYMBOL
-         );
-
-      long magic =
-         HistoryDealGetInteger(
-            ticket,
-            DEAL_MAGIC
-         );
-
-      long entry =
-         HistoryDealGetInteger(
-            ticket,
-            DEAL_ENTRY
-         );
-
-      if(symbol == _Symbol &&
-         (ulong)magic == MagicNumber &&
-         (entry == DEAL_ENTRY_OUT ||
-          entry == DEAL_ENTRY_OUT_BY))
-      {
-         LastProcessedDealTicket =
-            ticket;
-
-         return;
-      }
-   }
-}
-
-//====================================================================
-// UPDATE CONSECUTIVE LOSSES
-//====================================================================
-
-void UpdateConsecutiveLosses()
-{
-   datetime fromTime =
-      TimeCurrent() - 86400;
-
-   datetime toTime =
-      TimeCurrent();
-
-   if(!HistorySelect(fromTime,toTime))
+   if(symbol != _Symbol)
       return;
 
-   int total =
-      HistoryDealsTotal();
+   if((ulong)magic != MagicNumber)
+      return;
 
-   for(int i = 0;
-       i < total;
-       i++)
+   long entry =
+      HistoryDealGetInteger(
+         dealTicket,
+         DEAL_ENTRY
+      );
+
+   // Only count closing deals.
+   if(entry != DEAL_ENTRY_OUT &&
+      entry != DEAL_ENTRY_OUT_BY)
    {
-      ulong ticket =
-         HistoryDealGetTicket(i);
-
-      if(ticket == 0)
-         continue;
-
-      if(ticket <= LastProcessedDealTicket)
-         continue;
-
-      string symbol =
-         HistoryDealGetString(
-            ticket,
-            DEAL_SYMBOL
-         );
-
-      long magic =
-         HistoryDealGetInteger(
-            ticket,
-            DEAL_MAGIC
-         );
-
-      if(symbol != _Symbol ||
-         (ulong)magic != MagicNumber)
-         continue;
-
-      long entry =
-         HistoryDealGetInteger(
-            ticket,
-            DEAL_ENTRY
-         );
-
-      if(entry != DEAL_ENTRY_OUT &&
-         entry != DEAL_ENTRY_OUT_BY)
-         continue;
-
-      double profit =
-         HistoryDealGetDouble(
-            ticket,
-            DEAL_PROFIT
-         );
-
-      double swap =
-         HistoryDealGetDouble(
-            ticket,
-            DEAL_SWAP
-         );
-
-      double commission =
-         HistoryDealGetDouble(
-            ticket,
-            DEAL_COMMISSION
-         );
-
-      double netResult =
-         profit + swap + commission;
-
-      if(netResult < 0.0)
-      {
-         ConsecutiveLosses++;
-
-         Print(
-            "LOSS recorded. Consecutive losses = ",
-            ConsecutiveLosses
-         );
-      }
-      else if(netResult > 0.0)
-      {
-         ConsecutiveLosses = 0;
-
-         Print(
-            "PROFIT recorded. Consecutive losses reset."
-         );
-      }
-
-      LastProcessedDealTicket = ticket;
+      return;
    }
 
-   UpdateButtonState();
+   double profit =
+      HistoryDealGetDouble(
+         dealTicket,
+         DEAL_PROFIT
+      );
+
+   double swap =
+      HistoryDealGetDouble(
+         dealTicket,
+         DEAL_SWAP
+      );
+
+   double commission =
+      HistoryDealGetDouble(
+         dealTicket,
+         DEAL_COMMISSION
+      );
+
+   double netResult =
+      profit + swap + commission;
+
+   if(netResult < 0.0)
+   {
+      ConsecutiveLosses++;
+
+      Print(
+         "Trade closed in LOSS. ",
+         "Consecutive losses=",
+         ConsecutiveLosses
+      );
+   }
+   else if(netResult > 0.0)
+   {
+      ConsecutiveLosses = 0;
+
+      Print(
+         "Trade closed in PROFIT. ",
+         "Consecutive losses reset to 0."
+      );
+   }
+
+   ShowStatus();
 }
 
 //+------------------------------------------------------------------+
