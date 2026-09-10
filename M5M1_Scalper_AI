@@ -1,0 +1,870 @@
+//+------------------------------------------------------------------+
+//|                                             M5M1_Scalper_AI.mq5 |
+//|                    M5 Direction + M1 Entry Scalper              |
+//|                              Version 1.00                       |
+//+------------------------------------------------------------------+
+#property copyright "M5M1 Scalper AI"
+#property version   "1.00"
+#property strict
+
+#include <Trade/Trade.mqh>
+
+CTrade trade;
+
+//==================================================================
+// INPUTS
+//==================================================================
+
+//--- Main trading control
+input bool   TradingEnabled       = true;
+input ulong  MagicNumber          = 51001001;
+input int    MaximumOpenPositions = 1;
+
+//--- Lot sizing
+input bool   UseAutomaticLot      = false;
+input double FixedLotSize         = 0.01;
+input double LotPerBalance        = 0.001;
+
+//--- Timeframes
+input ENUM_TIMEFRAMES TrendTimeframe = PERIOD_M5;
+input ENUM_TIMEFRAMES EntryTimeframe = PERIOD_M1;
+
+//--- M5 structure
+input int    StructureLookback    = 50;
+
+//--- Support and resistance
+input int    SRLookback           = 50;
+input double SRTolerancePoints    = 100.0;
+
+//--- M1 confirmation
+input int    ConfirmationCandles  = 2;
+
+//--- Breakout
+input bool   UseBreakout          = true;
+input double BreakoutBufferPoints = 20.0;
+
+//--- Stop Loss
+input bool   UseStopLoss          = true;
+input double StopLossPoints       = 300.0;
+
+//--- Take Profit
+input bool   UseTakeProfit        = true;
+input double TakeProfitPoints     = 600.0;
+
+//--- Spread protection
+input bool   UseSpreadFilter      = true;
+input double MaximumSpreadPoints  = 50.0;
+
+//--- Execution
+input int    SlippagePoints       = 20;
+
+//==================================================================
+// GLOBAL VARIABLES
+//==================================================================
+
+datetime lastEntryBar = 0;
+
+double currentSupport    = 0.0;
+double currentResistance = 0.0;
+
+int currentM5Direction = 0;
+
+//  1  = bullish
+// -1  = bearish
+//  0  = neutral
+
+//==================================================================
+// INITIALIZATION
+//==================================================================
+
+int OnInit()
+{
+   trade.SetExpertMagicNumber(MagicNumber);
+   trade.SetDeviationInPoints(SlippagePoints);
+
+   EventSetTimer(1);
+
+   Print("========================================");
+   Print("M5M1 Scalper AI initialized");
+   Print("Symbol: ", _Symbol);
+   Print("Trend timeframe: M5");
+   Print("Entry timeframe: M1");
+   Print("========================================");
+
+   return(INIT_SUCCEEDED);
+}
+
+//==================================================================
+// DEINITIALIZATION
+//==================================================================
+
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+
+   Comment("");
+
+   Print("M5M1 Scalper AI stopped.");
+}
+
+//==================================================================
+// MAIN TICK FUNCTION
+//==================================================================
+
+void OnTick()
+{
+   UpdateMarketLevels();
+
+   currentM5Direction = GetM5Direction();
+
+   if(!TradingEnabled)
+      return;
+
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+      return;
+
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
+      return;
+
+   if(!IsSpreadAcceptable())
+      return;
+
+   if(currentM5Direction == 0)
+      return;
+
+   if(CountOurPositions() >= MaximumOpenPositions)
+      return;
+
+   if(!IsNewEntryBar())
+      return;
+
+   if(currentM5Direction == 1)
+   {
+      if(IsBuyConfirmation())
+         OpenBuy();
+   }
+   else if(currentM5Direction == -1)
+   {
+      if(IsSellConfirmation())
+         OpenSell();
+   }
+}
+
+//==================================================================
+// TIMER
+//==================================================================
+
+void OnTimer()
+{
+   UpdateMarketLevels();
+
+   currentM5Direction = GetM5Direction();
+
+   ShowStatus();
+}
+
+//==================================================================
+// END OF PART 1
+//==================================================================//+------------------------------------------------------------------+
+//| PART 2 - MARKET ANALYSIS                                         |
+//+------------------------------------------------------------------+
+
+//==================================================================
+// SPREAD CHECK
+//==================================================================
+
+bool IsSpreadAcceptable()
+{
+   if(!UseSpreadFilter)
+      return true;
+
+   MqlTick tick;
+
+   if(!SymbolInfoTick(_Symbol, tick))
+      return false;
+
+   double spreadPoints = (tick.ask - tick.bid) / _Point;
+
+   if(spreadPoints > MaximumSpreadPoints)
+      return false;
+
+   return true;
+}
+
+//==================================================================
+// COUNT EA POSITIONS
+//==================================================================
+
+int CountOurPositions()
+{
+   int count = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      string symbol = PositionGetString(POSITION_SYMBOL);
+      long magic = PositionGetInteger(POSITION_MAGIC);
+
+      if(symbol == _Symbol && (ulong)magic == MagicNumber)
+         count++;
+   }
+
+   return count;
+}
+
+//==================================================================
+// CHECK FOR NEW M1 BAR
+//==================================================================
+
+bool IsNewEntryBar()
+{
+   datetime barTime = iTime(_Symbol, EntryTimeframe, 0);
+
+   if(barTime <= 0)
+      return false;
+
+   if(barTime != lastEntryBar)
+   {
+      lastEntryBar = barTime;
+      return true;
+   }
+
+   return false;
+}
+
+//==================================================================
+// DETERMINE M5 DIRECTION
+//==================================================================
+
+int GetM5Direction()
+{
+   int requiredBars = StructureLookback + 10;
+
+   if(Bars(_Symbol, TrendTimeframe) < requiredBars)
+      return 0;
+
+   int half = StructureLookback / 2;
+
+   if(half < 5)
+      half = 5;
+
+   double recentHigh = -DBL_MAX;
+   double recentLow = DBL_MAX;
+
+   double olderHigh = -DBL_MAX;
+   double olderLow = DBL_MAX;
+
+   //--- Recent section
+   for(int i = 1; i <= half; i++)
+   {
+      double highValue = iHigh(_Symbol, TrendTimeframe, i);
+      double lowValue = iLow(_Symbol, TrendTimeframe, i);
+
+      if(highValue > recentHigh)
+         recentHigh = highValue;
+
+      if(lowValue < recentLow)
+         recentLow = lowValue;
+   }
+
+   //--- Older section
+   for(int i = half + 1; i <= StructureLookback; i++)
+   {
+      double highValue = iHigh(_Symbol, TrendTimeframe, i);
+      double lowValue = iLow(_Symbol, TrendTimeframe, i);
+
+      if(highValue > olderHigh)
+         olderHigh = highValue;
+
+      if(lowValue < olderLow)
+         olderLow = lowValue;
+   }
+
+   //--- Bullish structure
+   if(recentHigh > olderHigh && recentLow > olderLow)
+      return 1;
+
+   //--- Bearish structure
+   if(recentHigh < olderHigh && recentLow < olderLow)
+      return -1;
+
+   return 0;
+}
+
+//==================================================================
+// UPDATE SUPPORT AND RESISTANCE
+//==================================================================
+
+void UpdateMarketLevels()
+{
+   currentSupport = 0.0;
+   currentResistance = 0.0;
+
+   int availableBars = Bars(_Symbol, TrendTimeframe);
+
+   if(availableBars < 10)
+      return;
+
+   int lookback = SRLookback;
+
+   if(lookback > availableBars - 1)
+      lookback = availableBars - 1;
+
+   double lowestPrice = DBL_MAX;
+   double highestPrice = -DBL_MAX;
+
+   for(int i = 1; i <= lookback; i++)
+   {
+      double highValue = iHigh(_Symbol, TrendTimeframe, i);
+      double lowValue = iLow(_Symbol, TrendTimeframe, i);
+
+      if(highValue > highestPrice)
+         highestPrice = highValue;
+
+      if(lowValue < lowestPrice)
+         lowestPrice = lowValue;
+   }
+
+   if(lowestPrice != DBL_MAX)
+      currentSupport = lowestPrice;
+
+   if(highestPrice != -DBL_MAX)
+      currentResistance = highestPrice;
+}
+
+//==================================================================
+// CHECK NEAR SUPPORT
+//==================================================================
+
+bool IsNearSupport()
+{
+   if(currentSupport <= 0.0)
+      return false;
+
+   MqlTick tick;
+
+   if(!SymbolInfoTick(_Symbol, tick))
+      return false;
+
+   double distance = MathAbs(tick.bid - currentSupport);
+
+   if(distance <= SRTolerancePoints * _Point)
+      return true;
+
+   return false;
+}
+
+//==================================================================
+// CHECK NEAR RESISTANCE
+//==================================================================
+
+bool IsNearResistance()
+{
+   if(currentResistance <= 0.0)
+      return false;
+
+   MqlTick tick;
+
+   if(!SymbolInfoTick(_Symbol, tick))
+      return false;
+
+   double distance = MathAbs(tick.ask - currentResistance);
+
+   if(distance <= SRTolerancePoints * _Point)
+      return true;
+
+   return false;
+}
+
+//==================================================================
+// M1 BUY CONFIRMATION
+//==================================================================
+
+bool IsBuyConfirmation()
+{
+   if(ConfirmationCandles < 1)
+      return false;
+
+   int requiredBars = ConfirmationCandles + 5;
+
+   if(Bars(_Symbol, EntryTimeframe) < requiredBars)
+      return false;
+
+   //--- Two closed M1 candles
+   double open1 = iOpen(_Symbol, EntryTimeframe, 1);
+   double close1 = iClose(_Symbol, EntryTimeframe, 1);
+
+   double open2 = iOpen(_Symbol, EntryTimeframe, 2);
+   double close2 = iClose(_Symbol, EntryTimeframe, 2);
+
+   if(open1 <= 0.0 || close1 <= 0.0)
+      return false;
+
+   bool candle1Bullish = close1 > open1;
+
+   bool candle2Bullish = close2 > open2;
+
+   //--- Standard bullish confirmation
+   if(ConfirmationCandles >= 2)
+   {
+      if(candle1Bullish && candle2Bullish)
+         return true;
+   }
+   else
+   {
+      if(candle1Bullish)
+         return true;
+   }
+
+   //--- Support confirmation
+   if(IsNearSupport() && candle1Bullish)
+      return true;
+
+   //--- Breakout confirmation
+   if(UseBreakout)
+   {
+      double previousHigh = iHigh(_Symbol, EntryTimeframe, 2);
+
+      if(previousHigh > 0.0)
+      {
+         if(close1 > previousHigh + BreakoutBufferPoints * _Point)
+            return true;
+      }
+   }
+
+   return false;
+}
+
+//==================================================================
+// M1 SELL CONFIRMATION
+//==================================================================
+
+bool IsSellConfirmation()
+{
+   if(ConfirmationCandles < 1)
+      return false;
+
+   int requiredBars = ConfirmationCandles + 5;
+
+   if(Bars(_Symbol, EntryTimeframe) < requiredBars)
+      return false;
+
+   //--- Two closed M1 candles
+   double open1 = iOpen(_Symbol, EntryTimeframe, 1);
+   double close1 = iClose(_Symbol, EntryTimeframe, 1);
+
+   double open2 = iOpen(_Symbol, EntryTimeframe, 2);
+   double close2 = iClose(_Symbol, EntryTimeframe, 2);
+
+   if(open1 <= 0.0 || close1 <= 0.0)
+      return false;
+
+   bool candle1Bearish = close1 < open1;
+
+   bool candle2Bearish = close2 < open2;
+
+   //--- Standard bearish confirmation
+   if(ConfirmationCandles >= 2)
+   {
+      if(candle1Bearish && candle2Bearish)
+         return true;
+   }
+   else
+   {
+      if(candle1Bearish)
+         return true;
+   }
+
+   //--- Resistance confirmation
+   if(IsNearResistance() && candle1Bearish)
+      return true;
+
+   //--- Breakdown confirmation
+   if(UseBreakout)
+   {
+      double previousLow = iLow(_Symbol, EntryTimeframe, 2);
+
+      if(previousLow > 0.0)
+      {
+         if(close1 < previousLow - BreakoutBufferPoints * _Point)
+            return true;
+      }
+   }
+
+   return false;
+}
+
+//==================================================================
+// END OF PART 2
+//==================================================================//+------------------------------------------------------------------+
+//| PART 3 - TRADE EXECUTION AND FINAL FUNCTIONS                     |
+//+------------------------------------------------------------------+
+
+//==================================================================
+// CALCULATE LOT SIZE
+//==================================================================
+
+double CalculateLotSize()
+{
+   double lot = FixedLotSize;
+
+   if(UseAutomaticLot)
+   {
+      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+      lot = balance * LotPerBalance;
+   }
+
+   return NormalizeLotSize(lot);
+}
+
+//==================================================================
+// NORMALIZE LOT SIZE
+//==================================================================
+
+double NormalizeLotSize(double lot)
+{
+   double minimumLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maximumLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+   if(minimumLot <= 0.0)
+      minimumLot = 0.01;
+
+   if(maximumLot <= 0.0)
+      maximumLot = 100.0;
+
+   if(lotStep <= 0.0)
+      lotStep = minimumLot;
+
+   if(lot < minimumLot)
+      lot = minimumLot;
+
+   if(lot > maximumLot)
+      lot = maximumLot;
+
+   lot = MathFloor(lot / lotStep) * lotStep;
+
+   if(lot < minimumLot)
+      lot = minimumLot;
+
+   return NormalizeDouble(lot, 8);
+}
+
+//==================================================================
+// BUY STOP LOSS
+//==================================================================
+
+double GetBuyStopLoss(double entryPrice)
+{
+   if(!UseStopLoss)
+      return 0.0;
+
+   double stopLoss = entryPrice - (StopLossPoints * _Point);
+
+   return NormalizeDouble(stopLoss, _Digits);
+}
+
+//==================================================================
+// BUY TAKE PROFIT
+//==================================================================
+
+double GetBuyTakeProfit(double entryPrice)
+{
+   if(!UseTakeProfit)
+      return 0.0;
+
+   double takeProfit = entryPrice + (TakeProfitPoints * _Point);
+
+   return NormalizeDouble(takeProfit, _Digits);
+}
+
+//==================================================================
+// SELL STOP LOSS
+//==================================================================
+
+double GetSellStopLoss(double entryPrice)
+{
+   if(!UseStopLoss)
+      return 0.0;
+
+   double stopLoss = entryPrice + (StopLossPoints * _Point);
+
+   return NormalizeDouble(stopLoss, _Digits);
+}
+
+//==================================================================
+// SELL TAKE PROFIT
+//==================================================================
+
+double GetSellTakeProfit(double entryPrice)
+{
+   if(!UseTakeProfit)
+      return 0.0;
+
+   double takeProfit = entryPrice - (TakeProfitPoints * _Point);
+
+   return NormalizeDouble(takeProfit, _Digits);
+}
+
+//==================================================================
+// CHECK STOP LEVEL DISTANCE
+//==================================================================
+
+bool StopsAreValid(
+   ENUM_ORDER_TYPE orderType,
+   double entryPrice,
+   double stopLoss,
+   double takeProfit
+)
+{
+   long stopsLevel = SymbolInfoInteger(
+      _Symbol,
+      SYMBOL_TRADE_STOPS_LEVEL
+   );
+
+   double minimumDistance = stopsLevel * _Point;
+
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      if(stopLoss > 0.0)
+      {
+         if(entryPrice - stopLoss < minimumDistance)
+            return false;
+      }
+
+      if(takeProfit > 0.0)
+      {
+         if(takeProfit - entryPrice < minimumDistance)
+            return false;
+      }
+   }
+
+   if(orderType == ORDER_TYPE_SELL)
+   {
+      if(stopLoss > 0.0)
+      {
+         if(stopLoss - entryPrice < minimumDistance)
+            return false;
+      }
+
+      if(takeProfit > 0.0)
+      {
+         if(entryPrice - takeProfit < minimumDistance)
+            return false;
+      }
+   }
+
+   return true;
+}
+
+//==================================================================
+// OPEN BUY
+//==================================================================
+
+void OpenBuy()
+{
+   if(CountOurPositions() >= MaximumOpenPositions)
+      return;
+
+   MqlTick tick;
+
+   if(!SymbolInfoTick(_Symbol, tick))
+   {
+      Print("BUY cancelled: market price unavailable.");
+      return;
+   }
+
+   double lot = CalculateLotSize();
+
+   if(lot <= 0.0)
+   {
+      Print("BUY cancelled: invalid lot size.");
+      return;
+   }
+
+   double entryPrice = tick.ask;
+
+   double stopLoss = GetBuyStopLoss(entryPrice);
+
+   double takeProfit = GetBuyTakeProfit(entryPrice);
+
+   if(!StopsAreValid(
+      ORDER_TYPE_BUY,
+      entryPrice,
+      stopLoss,
+      takeProfit))
+   {
+      Print("BUY cancelled: SL/TP is too close to current price.");
+      return;
+   }
+
+   ResetLastError();
+
+   bool result = trade.Buy(
+      lot,
+      _Symbol,
+      0.0,
+      stopLoss,
+      takeProfit,
+      "M5M1 Scalper AI BUY"
+   );
+
+   if(result)
+   {
+      Print(
+         "BUY opened | Lot=",
+         DoubleToString(lot, 2),
+         " | Price=",
+         DoubleToString(entryPrice, _Digits),
+         " | SL=",
+         DoubleToString(stopLoss, _Digits),
+         " | TP=",
+         DoubleToString(takeProfit, _Digits)
+      );
+   }
+   else
+   {
+      Print(
+         "BUY failed | Retcode=",
+         IntegerToString((int)trade.ResultRetcode()),
+         " | ",
+         trade.ResultRetcodeDescription(),
+         " | Error=",
+         IntegerToString(GetLastError())
+      );
+   }
+}
+
+//==================================================================
+// OPEN SELL
+//==================================================================
+
+void OpenSell()
+{
+   if(CountOurPositions() >= MaximumOpenPositions)
+      return;
+
+   MqlTick tick;
+
+   if(!SymbolInfoTick(_Symbol, tick))
+   {
+      Print("SELL cancelled: market price unavailable.");
+      return;
+   }
+
+   double lot = CalculateLotSize();
+
+   if(lot <= 0.0)
+   {
+      Print("SELL cancelled: invalid lot size.");
+      return;
+   }
+
+   double entryPrice = tick.bid;
+
+   double stopLoss = GetSellStopLoss(entryPrice);
+
+   double takeProfit = GetSellTakeProfit(entryPrice);
+
+   if(!StopsAreValid(
+      ORDER_TYPE_SELL,
+      entryPrice,
+      stopLoss,
+      takeProfit))
+   {
+      Print("SELL cancelled: SL/TP is too close to current price.");
+      return;
+   }
+
+   ResetLastError();
+
+   bool result = trade.Sell(
+      lot,
+      _Symbol,
+      0.0,
+      stopLoss,
+      takeProfit,
+      "M5M1 Scalper AI SELL"
+   );
+
+   if(result)
+   {
+      Print(
+         "SELL opened | Lot=",
+         DoubleToString(lot, 2),
+         " | Price=",
+         DoubleToString(entryPrice, _Digits),
+         " | SL=",
+         DoubleToString(stopLoss, _Digits),
+         " | TP=",
+         DoubleToString(takeProfit, _Digits)
+      );
+   }
+   else
+   {
+      Print(
+         "SELL failed | Retcode=",
+         IntegerToString((int)trade.ResultRetcode()),
+         " | ",
+         trade.ResultRetcodeDescription(),
+         " | Error=",
+         IntegerToString(GetLastError())
+      );
+   }
+}
+
+//==================================================================
+// CONVERT DIRECTION TO TEXT
+//==================================================================
+
+string DirectionText()
+{
+   if(currentM5Direction == 1)
+      return "BULLISH";
+
+   if(currentM5Direction == -1)
+      return "BEARISH";
+
+   return "NEUTRAL";
+}
+
+//==================================================================
+// SHOW EA STATUS ON CHART
+//==================================================================
+
+void ShowStatus()
+{
+   string tradingText = "STOPPED";
+
+   if(TradingEnabled)
+      tradingText = "RUNNING";
+
+   string status =
+      "M5M1 SCALPER AI\n"
+      "------------------------------\n"
+      "Symbol: " + _Symbol + "\n"
+      "Status: " + tradingText + "\n"
+      "M5 Direction: " + DirectionText() + "\n"
+      "M5 Support: " +
+      DoubleToString(currentSupport, _Digits) + "\n"
+      "M5 Resistance: " +
+      DoubleToString(currentResistance, _Digits) + "\n"
+      "Open Positions: " +
+      IntegerToString(CountOurPositions()) + "\n"
+      "Lot Size: " +
+      DoubleToString(CalculateLotSize(), 2);
+
+   Comment(status);
+}
+
+//==================================================================
+// END OF M5M1 SCALPER AI
+//==================================================================
