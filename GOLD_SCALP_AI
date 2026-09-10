@@ -1,0 +1,1374 @@
+//+------------------------------------------------------------------+
+//| GOLD_SCALP_AI_M15_M5_M1.mq5                                     |
+//| XAUUSD M15 -> M5 -> M1 confirmation scalping EA                 |
+//+------------------------------------------------------------------+
+#property strict
+#property version   "1.00"
+#property description "Rule-based AI-style XAUUSD scalper."
+#property description "M15 direction, M5 pullback, M1 confirmation."
+
+#include <Trade/Trade.mqh>
+
+CTrade trade;
+
+input string InpTradingSymbol       = "";       // Blank = chart symbol
+input ulong  InpMagicNumber         = 26091001;
+
+input bool   InpStartTrading        = true;
+input bool   InpUseChartButton      = true;
+
+input double InpRiskPercent         = 0.50;     // Risk per trade
+input double InpFixedLot            = 0.01;     // Used if risk sizing is OFF
+input bool   InpUseRiskSizing       = true;
+
+input int    InpM15Period           = 20;
+input int    InpM5Lookback          = 12;
+input int    InpM1Lookback          = 3;
+
+input double InpMinAIScore          = 75.0;
+
+input double InpRiskReward          = 1.50;
+input int    InpSwingBufferPoints   = 50;
+
+input int    InpMaxPositions        = 1;
+input bool   InpOneTradePerM1Bar    = true;
+
+input int    InpTimerSeconds        = 1;
+
+input bool   InpUseATRStops         = true;
+input int    InpATRPeriod           = 14;
+input double InpATRMultiplier       = 1.20;
+
+string g_symbol = "";
+bool   g_enabled = false;
+
+datetime g_lastM1TradeBar = 0;
+
+string g_button = "GOLD_AI_TRADE_BUTTON";
+
+//+------------------------------------------------------------------+
+//| Expert initialization                                            |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   g_symbol = InpTradingSymbol;
+
+   if(g_symbol == "")
+      g_symbol = _Symbol;
+
+   trade.SetExpertMagicNumber(InpMagicNumber);
+
+   trade.SetDeviationInPoints(50);
+
+   trade.SetTypeFillingBySymbol(g_symbol);
+
+   g_enabled = InpStartTrading;
+
+   if(InpUseChartButton)
+      CreateButton();
+
+   EventSetTimer(MathMax(1, InpTimerSeconds));
+
+   Print("GOLD SCALP AI initialized on ", g_symbol);
+
+   Print("Trading = ",
+         (g_enabled ? "ON" : "OFF"));
+
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization                                          |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+
+   if(InpUseChartButton)
+      ObjectDelete(0, g_button);
+}
+
+//+------------------------------------------------------------------+
+//| Timer                                                            |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   ScanAndTrade();
+}
+
+//+------------------------------------------------------------------+
+//| Tick                                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   ScanAndTrade();
+}
+
+//+------------------------------------------------------------------+
+//| Chart button                                                     |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id,
+                  const long &lparam,
+                  const double &dparam,
+                  const string &sparam)
+{
+   if(id == CHARTEVENT_OBJECT_CLICK &&
+      sparam == g_button)
+   {
+      g_enabled = !g_enabled;
+
+      UpdateButton();
+
+      Print("GOLD SCALP AI trading ",
+            (g_enabled ? "ENABLED" : "DISABLED"));
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Main market scanner                                              |
+//+------------------------------------------------------------------+
+void ScanAndTrade()
+{
+   if(!g_enabled)
+      return;
+
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+      return;
+
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
+      return;
+
+   if(!SymbolSelect(g_symbol, true))
+      return;
+
+   if(InpMaxPositions > 0)
+   {
+      if(CountOurPositions() >= InpMaxPositions)
+         return;
+   }
+
+   MqlRates m15[];
+   MqlRates m5[];
+   MqlRates m1[];
+
+   if(!LoadRates(PERIOD_M15, 60, m15))
+      return;
+
+   if(!LoadRates(PERIOD_M5, 40, m5))
+      return;
+
+   if(!LoadRates(PERIOD_M1, 20, m1))
+      return;
+
+   double buyScore = 0.0;
+   double sellScore = 0.0;
+
+   //==============================================================
+   // STEP 1: M15 DIRECTION
+   //==============================================================
+
+   int m15Direction =
+      GetM15Direction(m15, buyScore, sellScore);
+
+   if(m15Direction == 0)
+      return;
+
+   //==============================================================
+   // STEP 2: M5 PULLBACK
+   //==============================================================
+
+   int pullbackDirection =
+      GetM5Pullback(
+         m5,
+         m15Direction,
+         buyScore,
+         sellScore
+      );
+
+   if(pullbackDirection == 0)
+      return;
+
+   //==============================================================
+   // STEP 3: M1 CONFIRMATION
+   //==============================================================
+
+   int confirmationDirection =
+      GetM1Confirmation(
+         m1,
+         m15Direction,
+         buyScore,
+         sellScore
+      );
+
+   if(confirmationDirection == 0)
+      return;
+
+   //==============================================================
+   // AI-STYLE SCORE
+   //==============================================================
+
+   double score = 0.0;
+
+   if(m15Direction > 0)
+      score = buyScore;
+   else
+      score = sellScore;
+
+   if(score < InpMinAIScore)
+      return;
+
+   //==============================================================
+   // PREVENT MULTIPLE ENTRIES ON SAME M1 CANDLE
+   //==============================================================
+
+   datetime currentM1Bar = m1[0].time;
+
+   if(InpOneTradePerM1Bar)
+   {
+      if(currentM1Bar == g_lastM1TradeBar)
+         return;
+   }
+
+   //==============================================================
+   // EXECUTE IMMEDIATELY
+   //==============================================================
+
+   ExecuteTrade(m15Direction, m1);
+}
+
+//+------------------------------------------------------------------+
+//| Load market candles                                              |
+//+------------------------------------------------------------------+
+bool LoadRates(
+   ENUM_TIMEFRAMES tf,
+   int count,
+   MqlRates &rates[]
+)
+{
+   ArraySetAsSeries(rates, true);
+
+   int copied =
+      CopyRates(
+         g_symbol,
+         tf,
+         0,
+         count,
+         rates
+      );
+
+   if(copied < count)
+      return false;
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| M15 trend scanner                                                |
+//+------------------------------------------------------------------+
+int GetM15Direction(
+   const MqlRates &r[],
+   double &buyScore,
+   double &sellScore
+)
+{
+   double sma =
+      SimpleMA(
+         r,
+         InpM15Period,
+         1
+      );
+
+   if(sma <= 0.0)
+      return 0;
+
+   double lastClose = r[1].close;
+   double prevClose = r[2].close;
+
+   double recentHigh =
+      HighestHigh(
+         r,
+         2,
+         6
+      );
+
+   double olderHigh =
+      HighestHigh(
+         r,
+         7,
+         6
+      );
+
+   double recentLow =
+      LowestLow(
+         r,
+         2,
+         6
+      );
+
+   double olderLow =
+      LowestLow(
+         r,
+         7,
+         6
+      );
+
+   bool bullish =
+      (
+         lastClose > sma &&
+         lastClose > prevClose &&
+         recentHigh >= olderHigh &&
+         recentLow >= olderLow
+      );
+
+   bool bearish =
+      (
+         lastClose < sma &&
+         lastClose < prevClose &&
+         recentHigh <= olderHigh &&
+         recentLow <= olderLow
+      );
+
+   if(bullish)
+   {
+      buyScore += 40.0;
+
+      Print("M15 direction = BULLISH");
+
+      return 1;
+   }
+
+   if(bearish)
+   {
+      sellScore += 40.0;
+
+      Print("M15 direction = BEARISH");
+
+      return -1;
+   }
+
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//| M5 pullback scanner                                              |
+//+------------------------------------------------------------------+
+int GetM5Pullback(
+   const MqlRates &r[],
+   int direction,
+   double &buyScore,
+   double &sellScore
+)
+{
+   double atr =
+      AverageTrueRange(
+         r,
+         InpATRPeriod,
+         1
+      );
+
+   if(atr <= 0.0)
+   {
+      double point =
+         SymbolInfoDouble(
+            g_symbol,
+            SYMBOL_POINT
+         );
+
+      atr = point * 100.0;
+   }
+
+   double support =
+      LowestLow(
+         r,
+         1,
+         InpM5Lookback
+      );
+
+   double resistance =
+      HighestHigh(
+         r,
+         1,
+         InpM5Lookback
+      );
+
+   double price = r[0].close;
+
+   double distanceToSupport =
+      MathAbs(
+         price - support
+      );
+
+   double distanceToResistance =
+      MathAbs(
+         price - resistance
+      );
+
+   bool bullishBounce =
+      (
+         r[1].close > r[1].open &&
+         r[1].low <= support + atr * 0.60 &&
+         r[0].close > r[1].close
+      );
+
+   bool bearishBounce =
+      (
+         r[1].close < r[1].open &&
+         r[1].high >= resistance - atr * 0.60 &&
+         r[0].close < r[1].close
+      );
+
+   if(direction > 0)
+   {
+      if(
+         bullishBounce ||
+         distanceToSupport <= atr * 0.75
+      )
+      {
+         buyScore += 25.0;
+
+         Print("M5 pullback = BUY setup");
+
+         return 1;
+      }
+   }
+
+   if(direction < 0)
+   {
+      if(
+         bearishBounce ||
+         distanceToResistance <= atr * 0.75
+      )
+      {
+         sellScore += 25.0;
+
+         Print("M5 pullback = SELL setup");
+
+         return -1;
+      }
+   }
+
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//| M1 confirmation scanner                                          |
+//+------------------------------------------------------------------+
+int GetM1Confirmation(
+   const MqlRates &r[],
+   int direction,
+   double &buyScore,
+   double &sellScore
+)
+{
+   double body =
+      MathAbs(
+         r[0].close -
+         r[0].open
+      );
+
+   double range =
+      r[0].high -
+      r[0].low;
+
+   if(range <= 0.0)
+      return 0;
+
+   bool bullishCandle =
+      (
+         r[0].close >
+         r[0].open
+      );
+
+   bool bearishCandle =
+      (
+         r[0].close <
+         r[0].open
+      );
+
+   bool bullishBreak =
+      (
+         r[0].close >
+         r[1].high
+      );
+
+   bool bearishBreak =
+      (
+         r[0].close <
+         r[1].low
+      );
+
+   bool bullishStrength =
+      (
+         bullishCandle &&
+         (body / range >= 0.45)
+      );
+
+   bool bearishStrength =
+      (
+         bearishCandle &&
+         (body / range >= 0.45)
+      );
+
+   if(direction > 0)
+   {
+      if(
+         bullishBreak ||
+         bullishStrength
+      )
+      {
+         buyScore += 35.0;
+
+         Print("M1 confirmation = BUY");
+
+         return 1;
+      }
+   }
+
+   if(direction < 0)
+   {
+      if(
+         bearishBreak ||
+         bearishStrength
+      )
+      {
+         sellScore += 35.0;
+
+         Print("M1 confirmation = SELL");
+
+         return -1;
+      }
+   }
+
+   return 0;
+}//+------------------------------------------------------------------+
+//| Execute trade                                                    |
+//+------------------------------------------------------------------+
+void ExecuteTrade(
+   int direction,
+   const MqlRates &m1[]
+)
+{
+   MqlTick tick;
+
+   if(!SymbolInfoTick(g_symbol, tick))
+      return;
+
+   double point =
+      SymbolInfoDouble(
+         g_symbol,
+         SYMBOL_POINT
+      );
+
+   int digits =
+      (int)SymbolInfoInteger(
+         g_symbol,
+         SYMBOL_DIGITS
+      );
+
+   double entry =
+      (direction > 0 ?
+       tick.ask :
+       tick.bid);
+
+   //==============================================================
+   // FIND RECENT M1 SWING
+   //==============================================================
+
+   double swing = 0.0;
+
+   if(direction > 0)
+   {
+      swing =
+         LowestLow(
+            m1,
+            1,
+            InpM1Lookback + 2
+         );
+   }
+   else
+   {
+      swing =
+         HighestHigh(
+            m1,
+            1,
+            InpM1Lookback + 2
+         );
+   }
+
+   //==============================================================
+   // ATR STOP DISTANCE
+   //==============================================================
+
+   double atr =
+      AverageTrueRange(
+         m1,
+         InpATRPeriod,
+         1
+      );
+
+   double stopDistance = 0.0;
+
+   if(
+      InpUseATRStops &&
+      atr > 0.0
+   )
+   {
+      stopDistance =
+         atr *
+         InpATRMultiplier;
+   }
+
+   if(stopDistance <= 0.0)
+   {
+      stopDistance =
+         MathAbs(
+            entry - swing
+         );
+   }
+
+   if(stopDistance <= 0.0)
+      return;
+
+   //==============================================================
+   // SWING BUFFER
+   //==============================================================
+
+   double buffer =
+      InpSwingBufferPoints *
+      point;
+
+   double sl = 0.0;
+   double tp = 0.0;
+
+   //==============================================================
+   // BUY
+   //==============================================================
+
+   if(direction > 0)
+   {
+      double swingSL =
+         swing - buffer;
+
+      double atrSL =
+         entry - stopDistance;
+
+      sl =
+         MathMin(
+            swingSL,
+            atrSL
+         );
+
+      if(sl >= entry)
+         sl =
+            entry -
+            stopDistance;
+
+      double risk =
+         entry - sl;
+
+      if(risk <= 0.0)
+         return;
+
+      tp =
+         entry +
+         risk *
+         InpRiskReward;
+   }
+
+   //==============================================================
+   // SELL
+   //==============================================================
+
+   else
+   {
+      double swingSL =
+         swing + buffer;
+
+      double atrSL =
+         entry + stopDistance;
+
+      sl =
+         MathMax(
+            swingSL,
+            atrSL
+         );
+
+      if(sl <= entry)
+         sl =
+            entry +
+            stopDistance;
+
+      double risk =
+         sl - entry;
+
+      if(risk <= 0.0)
+         return;
+
+      tp =
+         entry -
+         risk *
+         InpRiskReward;
+   }
+
+   //==============================================================
+   // MAKE SURE BROKER ACCEPTS SL / TP
+   //==============================================================
+
+   if(
+      !AdjustStopsForBroker(
+         direction,
+         entry,
+         sl,
+         tp
+      )
+   )
+   {
+      return;
+   }
+
+   //==============================================================
+   // CALCULATE LOT SIZE
+   //==============================================================
+
+   double lots =
+      CalculateLots(
+         MathAbs(
+            entry - sl
+         )
+      );
+
+   if(lots <= 0.0)
+      return;
+
+   string comment;
+
+   if(direction > 0)
+      comment = "GOLD_AI_BUY";
+   else
+      comment = "GOLD_AI_SELL";
+
+   //==============================================================
+   // EXECUTE BUY
+   //==============================================================
+
+   bool ok = false;
+
+   if(direction > 0)
+   {
+      ok =
+         trade.Buy(
+            lots,
+            g_symbol,
+            0.0,
+            sl,
+            tp,
+            comment
+         );
+   }
+
+   //==============================================================
+   // EXECUTE SELL
+   //==============================================================
+
+   else
+   {
+      ok =
+         trade.Sell(
+            lots,
+            g_symbol,
+            0.0,
+            sl,
+            tp,
+            comment
+         );
+   }
+
+   //==============================================================
+   // RESULT
+   //==============================================================
+
+   if(ok)
+   {
+      g_lastM1TradeBar =
+         m1[0].time;
+
+      Print(
+         comment,
+         " opened."
+      );
+
+      Print(
+         "Lots = ",
+         DoubleToString(
+            lots,
+            2
+         )
+      );
+
+      Print(
+         "Entry = ",
+         DoubleToString(
+            entry,
+            digits
+         )
+      );
+
+      Print(
+         "SL = ",
+         DoubleToString(
+            sl,
+            digits
+         )
+      );
+
+      Print(
+         "TP = ",
+         DoubleToString(
+            tp,
+            digits
+         )
+      );
+   }
+   else
+   {
+      Print(
+         "Trade failed."
+      );
+
+      Print(
+         "Retcode = ",
+         trade.ResultRetcode()
+      );
+
+      Print(
+         trade.ResultRetcodeDescription()
+      );
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Broker stop-distance protection                                  |
+//+------------------------------------------------------------------+
+bool AdjustStopsForBroker(
+   int direction,
+   double entry,
+   double &sl,
+   double &tp
+)
+{
+   double point =
+      SymbolInfoDouble(
+         g_symbol,
+         SYMBOL_POINT
+      );
+
+   long stopsLevel =
+      SymbolInfoInteger(
+         g_symbol,
+         SYMBOL_TRADE_STOPS_LEVEL
+      );
+
+   double minDistance =
+      stopsLevel *
+      point;
+
+   if(minDistance <= 0.0)
+   {
+      minDistance =
+         point * 10.0;
+   }
+
+   //==============================================================
+   // BUY
+   //==============================================================
+
+   if(direction > 0)
+   {
+      if(
+         entry - sl <
+         minDistance
+      )
+      {
+         sl =
+            entry -
+            minDistance;
+      }
+
+      if(
+         tp - entry <
+         minDistance
+      )
+      {
+         tp =
+            entry +
+            minDistance;
+      }
+
+      if(sl >= entry)
+         return false;
+
+      if(tp <= entry)
+         return false;
+   }
+
+   //==============================================================
+   // SELL
+   //==============================================================
+
+   else
+   {
+      if(
+         sl - entry <
+         minDistance
+      )
+      {
+         sl =
+            entry +
+            minDistance;
+      }
+
+      if(
+         entry - tp <
+         minDistance
+      )
+      {
+         tp =
+            entry -
+            minDistance;
+      }
+
+      if(sl <= entry)
+         return false;
+
+      if(tp >= entry)
+         return false;
+   }
+
+   int digits =
+      (int)SymbolInfoInteger(
+         g_symbol,
+         SYMBOL_DIGITS
+      );
+
+   sl =
+      NormalizeDouble(
+         sl,
+         digits
+      );
+
+   tp =
+      NormalizeDouble(
+         tp,
+         digits
+      );
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate risk-based lot size                                    |
+//+------------------------------------------------------------------+
+double CalculateLots(
+   double stopDistance
+)
+{
+   if(!InpUseRiskSizing)
+   {
+      return NormalizeVolume(
+         InpFixedLot
+      );
+   }
+
+   if(stopDistance <= 0.0)
+      return 0.0;
+
+   double equity =
+      AccountInfoDouble(
+         ACCOUNT_EQUITY
+      );
+
+   double riskMoney =
+      equity *
+      InpRiskPercent /
+      100.0;
+
+   double tickSize =
+      SymbolInfoDouble(
+         g_symbol,
+         SYMBOL_TRADE_TICK_SIZE
+      );
+
+   double tickValue =
+      SymbolInfoDouble(
+         g_symbol,
+         SYMBOL_TRADE_TICK_VALUE
+      );
+
+   if(
+      tickSize <= 0.0 ||
+      tickValue <= 0.0
+   )
+   {
+      return NormalizeVolume(
+         InpFixedLot
+      );
+   }
+
+   double moneyPerLot =
+      (
+         stopDistance /
+         tickSize
+      ) *
+      tickValue;
+
+   if(moneyPerLot <= 0.0)
+      return 0.0;
+
+   double lots =
+      riskMoney /
+      moneyPerLot;
+
+   return NormalizeVolume(
+      lots
+   );
+}
+
+//+------------------------------------------------------------------+
+//| Normalize lot size                                               |
+//+------------------------------------------------------------------+
+double NormalizeVolume(
+   double lots
+)
+{
+   double minLot =
+      SymbolInfoDouble(
+         g_symbol,
+         SYMBOL_VOLUME_MIN
+      );
+
+   double maxLot =
+      SymbolInfoDouble(
+         g_symbol,
+         SYMBOL_VOLUME_MAX
+      );
+
+   double step =
+      SymbolInfoDouble(
+         g_symbol,
+         SYMBOL_VOLUME_STEP
+      );
+
+   if(step <= 0.0)
+      step = minLot;
+
+   if(lots < minLot)
+      lots = minLot;
+
+   if(lots > maxLot)
+      lots = maxLot;
+
+   lots =
+      MathFloor(
+         lots / step
+      ) * step;
+
+   if(lots < minLot)
+      lots = minLot;
+
+   return NormalizeDouble(
+      lots,
+      2
+   );
+}
+
+//+------------------------------------------------------------------+
+//| Count this EA's open positions                                   |
+//+------------------------------------------------------------------+
+int CountOurPositions()
+{
+   int count = 0;
+
+   for(
+      int i = PositionsTotal() - 1;
+      i >= 0;
+      i--
+   )
+   {
+      ulong ticket =
+         PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(
+         !PositionSelectByTicket(
+            ticket
+         )
+      )
+      {
+         continue;
+      }
+
+      string symbol =
+         PositionGetString(
+            POSITION_SYMBOL
+         );
+
+      long magic =
+         PositionGetInteger(
+            POSITION_MAGIC
+         );
+
+      if(
+         symbol == g_symbol &&
+         (ulong)magic ==
+         InpMagicNumber
+      )
+      {
+         count++;
+      }
+   }
+
+   return count;
+}
+
+//+------------------------------------------------------------------+
+//| Simple moving average                                           |
+//+------------------------------------------------------------------+
+double SimpleMA(
+   const MqlRates &r[],
+   int period,
+   int startIndex
+)
+{
+   if(period <= 0)
+      return 0.0;
+
+   double sum = 0.0;
+
+   for(
+      int i = startIndex;
+      i < startIndex + period;
+      i++
+   )
+   {
+      sum += r[i].close;
+   }
+
+   return sum / period;
+}//+------------------------------------------------------------------+
+//| Highest high                                                    |
+//+------------------------------------------------------------------+
+double HighestHigh(
+   const MqlRates &r[],
+   int startIndex,
+   int count
+)
+{
+   double value =
+      -1.0e100;
+
+   for(
+      int i = startIndex;
+      i < startIndex + count;
+      i++
+   )
+   {
+      if(r[i].high > value)
+         value = r[i].high;
+   }
+
+   return value;
+}
+
+//+------------------------------------------------------------------+
+//| Lowest low                                                      |
+//+------------------------------------------------------------------+
+double LowestLow(
+   const MqlRates &r[],
+   int startIndex,
+   int count
+)
+{
+   double value =
+      1.0e100;
+
+   for(
+      int i = startIndex;
+      i < startIndex + count;
+      i++
+   )
+   {
+      if(r[i].low < value)
+         value = r[i].low;
+   }
+
+   return value;
+}
+
+//+------------------------------------------------------------------+
+//| Average true range                                              |
+//+------------------------------------------------------------------+
+double AverageTrueRange(
+   const MqlRates &r[],
+   int period,
+   int startIndex
+)
+{
+   if(period <= 0)
+      return 0.0;
+
+   double sum = 0.0;
+
+   for(
+      int i = startIndex;
+      i < startIndex + period;
+      i++
+   )
+   {
+      double previousClose =
+         r[i + 1].close;
+
+      double tr1 =
+         r[i].high -
+         r[i].low;
+
+      double tr2 =
+         MathAbs(
+            r[i].high -
+            previousClose
+         );
+
+      double tr3 =
+         MathAbs(
+            r[i].low -
+            previousClose
+         );
+
+      double tr =
+         MathMax(
+            tr1,
+            MathMax(
+               tr2,
+               tr3
+            )
+         );
+
+      sum += tr;
+   }
+
+   return sum / period;
+}
+
+//+------------------------------------------------------------------+
+//| Create ON/OFF button                                             |
+//+------------------------------------------------------------------+
+void CreateButton()
+{
+   if(
+      ObjectFind(
+         0,
+         g_button
+      ) >= 0
+   )
+   {
+      ObjectDelete(
+         0,
+         g_button
+      );
+   }
+
+   ObjectCreate(
+      0,
+      g_button,
+      OBJ_BUTTON,
+      0,
+      0,
+      0
+   );
+
+   ObjectSetInteger(
+      0,
+      g_button,
+      OBJPROP_CORNER,
+      CORNER_LEFT_UPPER
+   );
+
+   ObjectSetInteger(
+      0,
+      g_button,
+      OBJPROP_XDISTANCE,
+      10
+   );
+
+   ObjectSetInteger(
+      0,
+      g_button,
+      OBJPROP_YDISTANCE,
+      20
+   );
+
+   ObjectSetInteger(
+      0,
+      g_button,
+      OBJPROP_XSIZE,
+      140
+   );
+
+   ObjectSetInteger(
+      0,
+      g_button,
+      OBJPROP_YSIZE,
+      35
+   );
+
+   ObjectSetInteger(
+      0,
+      g_button,
+      OBJPROP_FONTSIZE,
+      10
+   );
+
+   UpdateButton();
+}
+
+//+------------------------------------------------------------------+
+//| Update ON/OFF button                                             |
+//+------------------------------------------------------------------+
+void UpdateButton()
+{
+   if(
+      ObjectFind(
+         0,
+         g_button
+      ) < 0
+   )
+   {
+      return;
+   }
+
+   if(g_enabled)
+   {
+      ObjectSetString(
+         0,
+         g_button,
+         OBJPROP_TEXT,
+         "GOLD AI: ON"
+      );
+   }
+   else
+   {
+      ObjectSetString(
+         0,
+         g_button,
+         OBJPROP_TEXT,
+         "GOLD AI: OFF"
+      );
+   }
+
+   ChartRedraw();
+}
+
+//+------------------------------------------------------------------+
+//| End of GOLD SCALP AI                                             |
+//+------------------------------------------------------------------+
