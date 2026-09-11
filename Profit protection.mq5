@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
-//| M1 TREND CONTINUATION PROFIT RETRACE - v7.2                     |
-//| M1 scalping EA with dual profit protection and Expert logs       |
+//| M1 TREND CONTINUATION PROFIT RETRACE - v8.0                     |
+//| Risk Controlled M1 Scalper                                      |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "7.20"
-#property description "M1 Trend Continuation EA - Dual Profit Protection - Expert Logs"
+#property version   "8.00"
+#property description "M1 Trend Continuation EA - Risk Controlled"
 
 #include <Trade/Trade.mqh>
 
@@ -25,16 +25,19 @@ input double SignalThreshold = 70.0;
 input double LotMultiplier  = 0.001;
 input double MaximumLotSize = 10.0;
 
+// NEW: maximum risk allowed on one trade
+input double MaximumRiskPercentPerTrade = 0.50;
+
 input int    StructureLookback       = 5;
 input int    ContinuationLookback    = 5;
 input int    ReverseBreakoutLookback = 5;
 input double MinimumBodyPercent      = 50.0;
 
-// EXISTING PROFIT PROTECTION - UNCHANGED
+// EXISTING PROFIT PROTECTION
 input double ProfitProtectionStart = 1.00;
 input double ProfitRetraceAmount   = 0.50;
 
-// NEW ADDITIONAL PROFIT PROTECTION
+// ADDITIONAL PROFIT PROTECTION
 input double ProfitRetracePercent  = 50.0;
 
 input int    MaximumOpenPositions  = 1;
@@ -63,8 +66,8 @@ double PeakPositionProfit     = 0.0;
 ulong  TrackedPositionTicket  = 0;
 
 datetime LastExpertLogTime = 0;
-string   LastExpertState   = "";
 
+// Function declarations
 void CreateControlButtons();
 void UpdateStatus();
 void ResetDailyStatisticsIfNeeded();
@@ -109,18 +112,28 @@ void CheckForEntry();
 bool OpenBuy();
 bool OpenSell();
 
+bool CalculateSafeStopLoss(
+   ENUM_ORDER_TYPE orderType,
+   double volume,
+   double entryPrice,
+   double &stopLoss);
+
+double CalculateRiskMoney();
+
 void ManageProfitRetrace();
 
-bool FindTrackedPosition(ulong &ticket,
-                         double &profit,
-                         long &positionType);
+bool FindTrackedPosition(
+   ulong &ticket,
+   double &profit,
+   long &positionType);
 
 void ResetProfitTracker();
 
 void LogExpertStatus();
 void LogEntryBlockReason();
 
-void UpdateConsecutiveLossesFromDeal(ulong dealTicket);
+void UpdateConsecutiveLossesFromDeal(
+   ulong dealTicket);
 
 //+------------------------------------------------------------------+
 //| INITIALIZATION                                                   |
@@ -149,17 +162,20 @@ int OnInit()
 
    if(EnableExpertLogs)
    {
-      Print("M1 SCALPER: EA INITIALIZED | Symbol=",
+      Print("M1 SCALPER v8.0: EA INITIALIZED | Symbol=",
             _Symbol,
             " | M1 | Trading=",
-            (TradingEnabled ? "RUNNING" : "STOPPED"),
-            " | Threshold=",
+            (TradingEnabled ? "RUNNING" : "STOPPED"));
+
+      Print("M1 SCALPER v8.0: ENTRY THRESHOLD=",
             DoubleToString(SignalThreshold,1),
+            "% | MAX RISK PER TRADE=",
+            DoubleToString(MaximumRiskPercentPerTrade,2),
             "%");
 
-      Print("M1 SCALPER: DUAL PROFIT PROTECTION | Fixed Retrace=$",
+      Print("M1 SCALPER v8.0: PROFIT PROTECTION | Fixed=$",
             DoubleToString(ProfitRetraceAmount,2),
-            " | Percentage Retrace=",
+            " | Percentage=",
             DoubleToString(ProfitRetracePercent,1),
             "%");
    }
@@ -192,8 +208,7 @@ void OnTick()
    ResetDailyStatisticsIfNeeded();
    UpdatePeakEquity();
 
-   // BOTH profit protection systems remain active
-   // even when START is OFF.
+   // Profit protection continues even when START is OFF.
    ManageProfitRetrace();
 
    if(!EnoughM1Bars())
@@ -215,7 +230,7 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
-//| CHART EVENTS                                                     |
+//| CHART BUTTONS                                                    |
 //+------------------------------------------------------------------+
 void OnChartEvent(const int id,
                   const long &lparam,
@@ -231,8 +246,7 @@ void OnChartEvent(const int id,
 
       if(EnableExpertLogs)
       {
-         Print("M1 SCALPER: START PRESSED | Trading enabled | Symbol=",
-               _Symbol);
+         Print("M1 SCALPER: START PRESSED | New entries ENABLED");
       }
 
       ObjectSetInteger(0,
@@ -249,7 +263,7 @@ void OnChartEvent(const int id,
 
       if(EnableExpertLogs)
       {
-         Print("M1 SCALPER: STOP PRESSED | New entries disabled");
+         Print("M1 SCALPER: STOP PRESSED | New entries DISABLED");
       }
 
       ObjectSetInteger(0,
@@ -291,10 +305,6 @@ void OnTradeTransaction(
 
    if(EnableExpertLogs)
    {
-      long dealType =
-         HistoryDealGetInteger(dealTicket,
-                               DEAL_TYPE);
-
       double dealVolume =
          HistoryDealGetDouble(dealTicket,
                               DEAL_VOLUME);
@@ -309,8 +319,6 @@ void OnTradeTransaction(
 
       Print("M1 SCALPER: DEAL EVENT | Ticket=",
             dealTicket,
-            " | Type=",
-            dealType,
             " | Volume=",
             DoubleToString(dealVolume,2),
             " | Price=",
@@ -323,7 +331,7 @@ void OnTradeTransaction(
 }
 
 //+------------------------------------------------------------------+
-//| CREATE START / STOP BUTTONS                                      |
+//| CREATE BUTTONS                                                   |
 //+------------------------------------------------------------------+
 void CreateControlButtons()
 {
@@ -411,7 +419,7 @@ void CreateControlButtons()
 }
 
 //+------------------------------------------------------------------+
-//| STATUS                                                           |
+//| STATUS DISPLAY                                                   |
 //+------------------------------------------------------------------+
 void UpdateStatus()
 {
@@ -426,21 +434,18 @@ void UpdateStatus()
    if(CurrentTrend == TREND_SELL)
       trendText = "SELL";
 
-   int openPositions =
-      CountOpenPositions();
-
-   double exposure =
-      GetCurrentExposureLots();
-
    string protectionText =
       ProfitProtectionActive ? "ACTIVE" : "WAITING";
 
    Comment(
-      "M1 SCALPER\n",
+      "M1 SCALPER v8.0\n",
       "Status: ", tradingState, "\n",
       "Symbol: ", _Symbol, "\n",
       "Timeframe: M1\n",
       "Trend: ", trendText, "\n",
+      "Risk/Trade: ",
+      DoubleToString(MaximumRiskPercentPerTrade,2),
+      "%\n",
       "Profit Protection: ", protectionText, "\n",
       "Peak Profit: $",
       DoubleToString(PeakPositionProfit,2), "\n",
@@ -450,16 +455,16 @@ void UpdateStatus()
       DoubleToString(ProfitRetracePercent,1),
       "%\n",
       "Open Positions: ",
-      IntegerToString(openPositions), "\n",
+      IntegerToString(CountOpenPositions()), "\n",
       "Exposure Lots: ",
-      DoubleToString(exposure,2), "\n",
+      DoubleToString(GetCurrentExposureLots(),2), "\n",
       "Consecutive Losses: ",
       IntegerToString(ConsecutiveLosses)
    );
 }
 
 //+------------------------------------------------------------------+
-//| RESET DAILY STATISTICS                                           |
+//| DAILY RESET                                                      |
 //+------------------------------------------------------------------+
 void ResetDailyStatisticsIfNeeded()
 {
@@ -470,7 +475,7 @@ void ResetDailyStatisticsIfNeeded()
 
    int dayKey =
       tm.year * 10000 +
-      tm.mon  * 100 +
+      tm.mon * 100 +
       tm.day;
 
    if(dayKey != LastTradingDayKey)
@@ -487,14 +492,14 @@ void ResetDailyStatisticsIfNeeded()
 
       if(EnableExpertLogs)
       {
-         Print("M1 SCALPER: NEW TRADING DAY | Start Balance=",
+         Print("M1 SCALPER: NEW TRADING DAY | Start Balance=$",
                DoubleToString(DayStartBalance,2));
       }
    }
 }
 
 //+------------------------------------------------------------------+
-//| UPDATE PEAK EQUITY                                               |
+//| PEAK EQUITY                                                      |
 //+------------------------------------------------------------------+
 void UpdatePeakEquity()
 {
@@ -523,15 +528,11 @@ bool DailyLossProtection()
       ((DayStartBalance - equity) /
        DayStartBalance) * 100.0;
 
-   if(lossPercent >= DailyLossLimitPercent)
-      return true;
-
-   return false;
+   return(lossPercent >= DailyLossLimitPercent);
 }
 
 //+------------------------------------------------------------------+
 //| DRAWDOWN PROTECTION                                              |
-//| Measured from START-OF-DAY BALANCE                               |
 //+------------------------------------------------------------------+
 bool DrawdownProtection()
 {
@@ -548,10 +549,7 @@ bool DrawdownProtection()
       ((DayStartBalance - equity) /
        DayStartBalance) * 100.0;
 
-   if(drawdownPercent >= MaximumDrawdownPercent)
-      return true;
-
-   return false;
+   return(drawdownPercent >= MaximumDrawdownPercent);
 }
 
 //+------------------------------------------------------------------+
@@ -562,11 +560,8 @@ bool ConsecutiveLossProtection()
    if(MaximumConsecutiveLosses <= 0)
       return false;
 
-   if(ConsecutiveLosses >=
-      MaximumConsecutiveLosses)
-      return true;
-
-   return false;
+   return(ConsecutiveLosses >=
+          MaximumConsecutiveLosses);
 }
 
 //+------------------------------------------------------------------+
@@ -590,7 +585,7 @@ bool CanTrade()
 }
 
 //+------------------------------------------------------------------+
-//| ENOUGH M1 BARS                                                   |
+//| ENOUGH BARS                                                      |
 //+------------------------------------------------------------------+
 bool EnoughM1Bars()
 {
@@ -607,14 +602,11 @@ bool EnoughM1Bars()
          )
       ) + 10;
 
-   if(bars < minimumBars)
-      return false;
-
-   return true;
+   return(bars >= minimumBars);
 }
 
 //+------------------------------------------------------------------+
-//| CALCULATE LOT SIZE                                               |
+//| CALCULATE LOT                                                    |
 //+------------------------------------------------------------------+
 double CalculateLotSize()
 {
@@ -662,22 +654,22 @@ double NormalizeVolume(double volume)
    volume =
       MathFloor(volume / step) * step;
 
-   int volumeDigits = 2;
+   int digits = 2;
 
    if(step == 1.0)
-      volumeDigits = 0;
+      digits = 0;
    else if(step == 0.1)
-      volumeDigits = 1;
+      digits = 1;
    else if(step == 0.01)
-      volumeDigits = 2;
+      digits = 2;
    else if(step == 0.001)
-      volumeDigits = 3;
+      digits = 3;
 
    return NormalizeDouble(volume,
-                          volumeDigits);
-}//-------------------------------------------------------------------
-// COUNT OPEN POSITIONS
-//-------------------------------------------------------------------
+                          digits);
+}//+------------------------------------------------------------------+
+//| COUNT OPEN POSITIONS                                             |
+//+------------------------------------------------------------------+
 int CountOpenPositions()
 {
    int count = 0;
@@ -695,16 +687,10 @@ int CountOpenPositions()
       if(!PositionSelectByTicket(ticket))
          continue;
 
-      string symbol =
-         PositionGetString(POSITION_SYMBOL);
-
-      long magic =
-         PositionGetInteger(POSITION_MAGIC);
-
-      if(symbol != _Symbol)
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
          continue;
 
-      if(magic != MagicNumber)
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber)
          continue;
 
       count++;
@@ -713,9 +699,9 @@ int CountOpenPositions()
    return count;
 }
 
-//-------------------------------------------------------------------
-// CURRENT EA EXPOSURE
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| CURRENT EXPOSURE                                                 |
+//+------------------------------------------------------------------+
 double GetCurrentExposureLots()
 {
    double exposure = 0.0;
@@ -733,16 +719,10 @@ double GetCurrentExposureLots()
       if(!PositionSelectByTicket(ticket))
          continue;
 
-      string symbol =
-         PositionGetString(POSITION_SYMBOL);
-
-      long magic =
-         PositionGetInteger(POSITION_MAGIC);
-
-      if(symbol != _Symbol)
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
          continue;
 
-      if(magic != MagicNumber)
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber)
          continue;
 
       exposure +=
@@ -752,9 +732,9 @@ double GetCurrentExposureLots()
    return exposure;
 }
 
-//-------------------------------------------------------------------
-// HIGHEST HIGH
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| HIGHEST HIGH                                                     |
+//+------------------------------------------------------------------+
 double GetHighestHigh(int startShift,
                       int count)
 {
@@ -776,9 +756,9 @@ double GetHighestHigh(int startShift,
    return highest;
 }
 
-//-------------------------------------------------------------------
-// LOWEST LOW
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| LOWEST LOW                                                       |
+//+------------------------------------------------------------------+
 double GetLowestLow(int startShift,
                     int count)
 {
@@ -800,9 +780,9 @@ double GetLowestLow(int startShift,
    return lowest;
 }
 
-//-------------------------------------------------------------------
-// BULLISH STRUCTURE
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| BULLISH STRUCTURE                                                |
+//+------------------------------------------------------------------+
 bool IsBullishStructure()
 {
    double recentHigh =
@@ -821,16 +801,13 @@ bool IsBullishStructure()
       GetLowestLow(StructureLookback + 1,
                    StructureLookback);
 
-   if(recentHigh > previousHigh &&
-      recentLow > previousLow)
-      return true;
-
-   return false;
+   return(recentHigh > previousHigh &&
+          recentLow > previousLow);
 }
 
-//-------------------------------------------------------------------
-// BEARISH STRUCTURE
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| BEARISH STRUCTURE                                                |
+//+------------------------------------------------------------------+
 bool IsBearishStructure()
 {
    double recentHigh =
@@ -849,16 +826,13 @@ bool IsBearishStructure()
       GetLowestLow(StructureLookback + 1,
                    StructureLookback);
 
-   if(recentHigh < previousHigh &&
-      recentLow < previousLow)
-      return true;
-
-   return false;
+   return(recentHigh < previousHigh &&
+          recentLow < previousLow);
 }
 
-//-------------------------------------------------------------------
-// BULLISH MOMENTUM
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| BULLISH MOMENTUM                                                 |
+//+------------------------------------------------------------------+
 bool BullishMomentum()
 {
    double openPrice =
@@ -896,16 +870,13 @@ bool BullishMomentum()
    double bodyPercent =
       (body / range) * 100.0;
 
-   if(currentPrice > openPrice &&
-      bodyPercent >= MinimumBodyPercent)
-      return true;
-
-   return false;
+   return(currentPrice > openPrice &&
+          bodyPercent >= MinimumBodyPercent);
 }
 
-//-------------------------------------------------------------------
-// BEARISH MOMENTUM
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| BEARISH MOMENTUM                                                 |
+//+------------------------------------------------------------------+
 bool BearishMomentum()
 {
    double openPrice =
@@ -943,159 +914,125 @@ bool BearishMomentum()
    double bodyPercent =
       (body / range) * 100.0;
 
-   if(currentPrice < openPrice &&
-      bodyPercent >= MinimumBodyPercent)
-      return true;
-
-   return false;
+   return(currentPrice < openPrice &&
+          bodyPercent >= MinimumBodyPercent);
 }
 
-//-------------------------------------------------------------------
-// BULLISH CONTINUATION BREAKOUT
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| BULLISH CONTINUATION BREAKOUT                                   |
+//+------------------------------------------------------------------+
 bool BullishContinuationBreakout()
 {
-   double currentAsk =
+   double ask =
       SymbolInfoDouble(_Symbol,
                        SYMBOL_ASK);
 
-   if(currentAsk <= 0.0)
+   if(ask <= 0.0)
       return false;
 
    double resistance =
       GetHighestHigh(1,
                      ContinuationLookback);
 
-   if(currentAsk > resistance)
-      return true;
-
-   return false;
+   return(ask > resistance);
 }
 
-//-------------------------------------------------------------------
-// BEARISH CONTINUATION BREAKOUT
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| BEARISH CONTINUATION BREAKOUT                                   |
+//+------------------------------------------------------------------+
 bool BearishContinuationBreakout()
 {
-   double currentBid =
+   double bid =
       SymbolInfoDouble(_Symbol,
                        SYMBOL_BID);
 
-   if(currentBid <= 0.0)
+   if(bid <= 0.0)
       return false;
 
    double support =
       GetLowestLow(1,
                    ContinuationLookback);
 
-   if(currentBid < support)
-      return true;
-
-   return false;
+   return(bid < support);
 }
 
-//-------------------------------------------------------------------
-// BULLISH REVERSE BREAKOUT
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| BULLISH REVERSE BREAKOUT                                        |
+//+------------------------------------------------------------------+
 bool BullishReverseBreakout()
 {
-   double currentAsk =
+   double ask =
       SymbolInfoDouble(_Symbol,
                        SYMBOL_ASK);
 
-   if(currentAsk <= 0.0)
+   if(ask <= 0.0)
       return false;
 
-   double breakoutLevel =
+   double level =
       GetHighestHigh(1,
                      ReverseBreakoutLookback);
 
-   if(currentAsk > breakoutLevel)
-      return true;
-
-   return false;
+   return(ask > level);
 }
 
-//-------------------------------------------------------------------
-// BEARISH REVERSE BREAKOUT
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| BEARISH REVERSE BREAKOUT                                        |
+//+------------------------------------------------------------------+
 bool BearishReverseBreakout()
 {
-   double currentBid =
+   double bid =
       SymbolInfoDouble(_Symbol,
                        SYMBOL_BID);
 
-   if(currentBid <= 0.0)
+   if(bid <= 0.0)
       return false;
 
-   double breakoutLevel =
+   double level =
       GetLowestLow(1,
                    ReverseBreakoutLookback);
 
-   if(currentBid < breakoutLevel)
-      return true;
-
-   return false;
+   return(bid < level);
 }
 
-//-------------------------------------------------------------------
-// DETECT INITIAL TREND
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| INITIAL TREND                                                    |
+//+------------------------------------------------------------------+
 int DetectInitialTrend()
 {
-   bool bullishStructure =
-      IsBullishStructure();
-
-   bool bearishStructure =
-      IsBearishStructure();
-
-   bool bullishMomentum =
-      BullishMomentum();
-
-   bool bearishMomentum =
-      BearishMomentum();
-
-   if(bullishStructure &&
-      bullishMomentum)
+   if(IsBullishStructure() &&
+      BullishMomentum())
       return TREND_BUY;
 
-   if(bearishStructure &&
-      bearishMomentum)
+   if(IsBearishStructure() &&
+      BearishMomentum())
       return TREND_SELL;
 
    return TREND_NONE;
 }
 
-//-------------------------------------------------------------------
-// UPDATE TREND STATE
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| UPDATE TREND                                                     |
+//+------------------------------------------------------------------+
 void UpdateTrendState()
 {
-   int detectedTrend =
+   int detected =
       DetectInitialTrend();
 
-   if(detectedTrend != TREND_NONE)
+   if(detected != TREND_NONE &&
+      detected != CurrentTrend)
    {
-      if(detectedTrend != CurrentTrend)
+      CurrentTrend = detected;
+
+      if(EnableExpertLogs)
       {
-         CurrentTrend = detectedTrend;
+         if(CurrentTrend == TREND_BUY)
+            Print("M1 SCALPER: TREND CHANGED -> BUY");
 
-         if(EnableExpertLogs)
-         {
-            if(CurrentTrend == TREND_BUY)
-            {
-               Print("M1 SCALPER: TREND CHANGED -> BUY");
-            }
-
-            if(CurrentTrend == TREND_SELL)
-            {
-               Print("M1 SCALPER: TREND CHANGED -> SELL");
-            }
-         }
+         if(CurrentTrend == TREND_SELL)
+            Print("M1 SCALPER: TREND CHANGED -> SELL");
       }
    }
 
-   // Live reversal detection.
    if(BullishReverseBreakout())
    {
       if(CurrentTrend != TREND_BUY)
@@ -1103,9 +1040,7 @@ void UpdateTrendState()
          CurrentTrend = TREND_BUY;
 
          if(EnableExpertLogs)
-         {
-            Print("M1 SCALPER: LIVE REVERSAL DETECTED -> BUY");
-         }
+            Print("M1 SCALPER: LIVE REVERSAL -> BUY");
       }
    }
 
@@ -1116,16 +1051,14 @@ void UpdateTrendState()
          CurrentTrend = TREND_SELL;
 
          if(EnableExpertLogs)
-         {
-            Print("M1 SCALPER: LIVE REVERSAL DETECTED -> SELL");
-         }
+            Print("M1 SCALPER: LIVE REVERSAL -> SELL");
       }
    }
 }
 
-//-------------------------------------------------------------------
-// BUY SCORE
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| BUY SCORE                                                        |
+//+------------------------------------------------------------------+
 double GetBuyScore()
 {
    double score = 0.0;
@@ -1148,9 +1081,9 @@ double GetBuyScore()
    return score;
 }
 
-//-------------------------------------------------------------------
-// SELL SCORE
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| SELL SCORE                                                       |
+//+------------------------------------------------------------------+
 double GetSellScore()
 {
    double score = 0.0;
@@ -1173,9 +1106,125 @@ double GetSellScore()
    return score;
 }
 
-//-------------------------------------------------------------------
-// CHECK FOR ENTRY
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| RISK MONEY                                                       |
+//+------------------------------------------------------------------+
+double CalculateRiskMoney()
+{
+   double balance =
+      AccountInfoDouble(ACCOUNT_BALANCE);
+
+   if(balance <= 0.0)
+      return 0.0;
+
+   return(balance *
+          MaximumRiskPercentPerTrade /
+          100.0);
+}
+
+//+------------------------------------------------------------------+
+//| CALCULATE SAFE STOP LOSS                                        |
+//+------------------------------------------------------------------+
+bool CalculateSafeStopLoss(
+   ENUM_ORDER_TYPE orderType,
+   double volume,
+   double entryPrice,
+   double &stopLoss)
+{
+   stopLoss = 0.0;
+
+   if(volume <= 0.0 ||
+      entryPrice <= 0.0)
+      return false;
+
+   double riskMoney =
+      CalculateRiskMoney();
+
+   if(riskMoney <= 0.0)
+      return false;
+
+   double tickSize =
+      SymbolInfoDouble(_Symbol,
+                       SYMBOL_TRADE_TICK_SIZE);
+
+   double tickValue =
+      SymbolInfoDouble(_Symbol,
+                       SYMBOL_TRADE_TICK_VALUE);
+
+   if(tickSize <= 0.0 ||
+      tickValue <= 0.0)
+   {
+      if(EnableExpertLogs)
+         Print("M1 SCALPER: SL CALCULATION FAILED | Invalid tick size/value");
+
+      return false;
+   }
+
+   // Maximum price movement allowed for the selected risk.
+   double priceDistance =
+      riskMoney *
+      tickSize /
+      (volume * tickValue);
+
+   if(priceDistance <= 0.0)
+      return false;
+
+   long stopsLevelPoints =
+      SymbolInfoInteger(_Symbol,
+                        SYMBOL_TRADE_STOPS_LEVEL);
+
+   double minimumDistance =
+      stopsLevelPoints * _Point;
+
+   // If the broker requires a larger SL distance than our
+   // 0.5% risk allows, reject the trade instead of risking more.
+   if(minimumDistance > priceDistance)
+   {
+      if(EnableExpertLogs)
+      {
+         Print("M1 SCALPER: ENTRY REJECTED | Broker minimum SL distance would exceed ",
+               DoubleToString(MaximumRiskPercentPerTrade,2),
+               "% risk");
+      }
+
+      return false;
+   }
+
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      stopLoss =
+         entryPrice - priceDistance;
+   }
+   else if(orderType == ORDER_TYPE_SELL)
+   {
+      stopLoss =
+         entryPrice + priceDistance;
+   }
+   else
+   {
+      return false;
+   }
+
+   // Normalize to symbol digits.
+   stopLoss =
+      NormalizeDouble(stopLoss,
+                      _Digits);
+
+   // Final safety check.
+   if(orderType == ORDER_TYPE_BUY &&
+      stopLoss >= entryPrice)
+      return false;
+
+   if(orderType == ORDER_TYPE_SELL &&
+      stopLoss <= entryPrice)
+      return false;
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| CHECK FOR ENTRY                                                  |
+//+------------------------------------------------------------------+
 void CheckForEntry()
 {
    if(!CanTrade())
@@ -1191,9 +1240,9 @@ void CheckForEntry()
    {
       if(EnableExpertLogs)
       {
-         Print("M1 SCALPER: ENTRY BLOCKED | Maximum open positions reached | Open=",
+         Print("M1 SCALPER: ENTRY BLOCKED | Position limit | Open=",
                openPositions,
-               " | Max=",
+               " | Maximum=",
                MaximumOpenPositions);
       }
 
@@ -1219,7 +1268,7 @@ void CheckForEntry()
    {
       if(EnableExpertLogs)
       {
-         Print("M1 SCALPER: ENTRY BLOCKED | EA exposure limit | Current=",
+         Print("M1 SCALPER: ENTRY BLOCKED | Exposure limit | Current=",
                DoubleToString(exposure,2),
                " | New=",
                DoubleToString(lot,2),
@@ -1238,9 +1287,9 @@ void CheckForEntry()
 
    if(EnableExpertLogs)
    {
-      Print("M1 SCALPER: SCANNING | BUY SCORE=",
+      Print("M1 SCALPER: SCANNING | BUY=",
             DoubleToString(buyScore,1),
-            "% | SELL SCORE=",
+            "% | SELL=",
             DoubleToString(sellScore,1),
             "% | Threshold=",
             DoubleToString(SignalThreshold,1),
@@ -1255,8 +1304,8 @@ void CheckForEntry()
                DoubleToString(buyScore,1),
                "%");
 
-      if(OpenBuy())
-         return;
+      OpenBuy();
+      return;
    }
 
    if(sellScore >= SignalThreshold &&
@@ -1267,15 +1316,15 @@ void CheckForEntry()
                DoubleToString(sellScore,1),
                "%");
 
-      if(OpenSell())
-         return;
+      OpenSell();
+      return;
    }
 
    if(EnableExpertLogs)
       Print("M1 SCALPER: WAITING | No confirmed entry");
-}//-------------------------------------------------------------------
-// OPEN BUY
-//-------------------------------------------------------------------
+}//+------------------------------------------------------------------+
+//| OPEN BUY                                                         |
+//+------------------------------------------------------------------+
 bool OpenBuy()
 {
    double lot =
@@ -1291,17 +1340,35 @@ bool OpenBuy()
    if(ask <= 0.0)
       return false;
 
+   double stopLoss = 0.0;
+
+   if(!CalculateSafeStopLoss(
+         ORDER_TYPE_BUY,
+         lot,
+         ask,
+         stopLoss))
+   {
+      if(EnableExpertLogs)
+      {
+         Print("M1 SCALPER: BUY REJECTED | Could not calculate safe 0.5% SL");
+      }
+
+      return false;
+   }
+
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(SlippagePoints);
 
-   // No fixed SL and no fixed TP.
+   // HARD SL is used.
+   // TP remains zero because profit protection manages exits.
    bool result =
-      trade.Buy(lot,
-                _Symbol,
-                0.0,
-                0.0,
-                0.0,
-                "M1 Trend BUY");
+      trade.Buy(
+         lot,
+         _Symbol,
+         0.0,
+         stopLoss,
+         0.0,
+         "M1 Trend BUY");
 
    if(result)
    {
@@ -1309,8 +1376,13 @@ bool OpenBuy()
       {
          Print("M1 SCALPER: TRADE OPENED | BUY | Lot=",
                DoubleToString(lot,2),
-               " | Price=",
-               DoubleToString(ask,_Digits));
+               " | Entry=",
+               DoubleToString(ask,_Digits),
+               " | HARD SL=",
+               DoubleToString(stopLoss,_Digits),
+               " | Max Risk=",
+               DoubleToString(MaximumRiskPercentPerTrade,2),
+               "%");
       }
    }
    else
@@ -1327,9 +1399,9 @@ bool OpenBuy()
    return result;
 }
 
-//-------------------------------------------------------------------
-// OPEN SELL
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| OPEN SELL                                                        |
+//+------------------------------------------------------------------+
 bool OpenSell()
 {
    double lot =
@@ -1345,17 +1417,35 @@ bool OpenSell()
    if(bid <= 0.0)
       return false;
 
+   double stopLoss = 0.0;
+
+   if(!CalculateSafeStopLoss(
+         ORDER_TYPE_SELL,
+         lot,
+         bid,
+         stopLoss))
+   {
+      if(EnableExpertLogs)
+      {
+         Print("M1 SCALPER: SELL REJECTED | Could not calculate safe 0.5% SL");
+      }
+
+      return false;
+   }
+
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(SlippagePoints);
 
-   // No fixed SL and no fixed TP.
+   // HARD SL is used.
+   // TP remains zero because profit protection manages exits.
    bool result =
-      trade.Sell(lot,
-                 _Symbol,
-                 0.0,
-                 0.0,
-                 0.0,
-                 "M1 Trend SELL");
+      trade.Sell(
+         lot,
+         _Symbol,
+         0.0,
+         stopLoss,
+         0.0,
+         "M1 Trend SELL");
 
    if(result)
    {
@@ -1363,8 +1453,13 @@ bool OpenSell()
       {
          Print("M1 SCALPER: TRADE OPENED | SELL | Lot=",
                DoubleToString(lot,2),
-               " | Price=",
-               DoubleToString(bid,_Digits));
+               " | Entry=",
+               DoubleToString(bid,_Digits),
+               " | HARD SL=",
+               DoubleToString(stopLoss,_Digits),
+               " | Max Risk=",
+               DoubleToString(MaximumRiskPercentPerTrade,2),
+               "%");
       }
    }
    else
@@ -1381,12 +1476,13 @@ bool OpenSell()
    return result;
 }
 
-//-------------------------------------------------------------------
-// FIND TRACKED POSITION
-//-------------------------------------------------------------------
-bool FindTrackedPosition(ulong &ticket,
-                          double &profit,
-                          long &positionType)
+//+------------------------------------------------------------------+
+//| FIND TRACKED POSITION                                            |
+//+------------------------------------------------------------------+
+bool FindTrackedPosition(
+   ulong &ticket,
+   double &profit,
+   long &positionType)
 {
    ticket = 0;
    profit = 0.0;
@@ -1405,16 +1501,10 @@ bool FindTrackedPosition(ulong &ticket,
       if(!PositionSelectByTicket(positionTicket))
          continue;
 
-      string symbol =
-         PositionGetString(POSITION_SYMBOL);
-
-      long magic =
-         PositionGetInteger(POSITION_MAGIC);
-
-      if(symbol != _Symbol)
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
          continue;
 
-      if(magic != MagicNumber)
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber)
          continue;
 
       ticket = positionTicket;
@@ -1431,9 +1521,9 @@ bool FindTrackedPosition(ulong &ticket,
    return false;
 }
 
-//-------------------------------------------------------------------
-// RESET PROFIT TRACKER
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| RESET PROFIT TRACKER                                             |
+//+------------------------------------------------------------------+
 void ResetProfitTracker()
 {
    ProfitProtectionActive = false;
@@ -1441,9 +1531,9 @@ void ResetProfitTracker()
    TrackedPositionTicket  = 0;
 }
 
-//-------------------------------------------------------------------
-// MANAGE BOTH PROFIT PROTECTION SYSTEMS
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| MANAGE PROFIT PROTECTION                                         |
+//+------------------------------------------------------------------+
 void ManageProfitRetrace()
 {
    ulong ticket = 0;
@@ -1451,9 +1541,10 @@ void ManageProfitRetrace()
    long positionType = -1;
 
    bool found =
-      FindTrackedPosition(ticket,
-                          profit,
-                          positionType);
+      FindTrackedPosition(
+         ticket,
+         profit,
+         positionType);
 
    if(!found)
    {
@@ -1461,9 +1552,7 @@ void ManageProfitRetrace()
          ProfitProtectionActive)
       {
          if(EnableExpertLogs)
-         {
             Print("M1 SCALPER: PROFIT TRACKER RESET | No EA position");
-         }
 
          ResetProfitTracker();
       }
@@ -1471,9 +1560,7 @@ void ManageProfitRetrace()
       return;
    }
 
-   //----------------------------------------------------------------
-   // Start tracking a new position.
-   //----------------------------------------------------------------
+   // New position
    if(ticket != TrackedPositionTicket)
    {
       TrackedPositionTicket = ticket;
@@ -1491,16 +1578,11 @@ void ManageProfitRetrace()
       }
    }
 
-   //----------------------------------------------------------------
-   // Update highest profit reached.
-   //----------------------------------------------------------------
+   // Record highest profit.
    if(profit > PeakPositionProfit)
       PeakPositionProfit = profit;
 
-   //----------------------------------------------------------------
-   // EXISTING RULE:
-   // Activate protection once peak reaches $1.
-   //----------------------------------------------------------------
+   // Existing protection activates at $1.
    if(!ProfitProtectionActive &&
       PeakPositionProfit >= ProfitProtectionStart)
    {
@@ -1512,68 +1594,53 @@ void ManageProfitRetrace()
                DoubleToString(PeakPositionProfit,2),
                " | Fixed Retrace=$",
                DoubleToString(ProfitRetraceAmount,2),
-               " | 50% Retrace=",
-               DoubleToString(ProfitRetracePercent,1),
-               "%");
+               " | 50% Retrace");
       }
    }
 
-   //----------------------------------------------------------------
-   // Do not apply profit-retrace protection until the trade has
-   // reached the existing minimum protection profit.
-   //----------------------------------------------------------------
    if(!ProfitProtectionActive)
       return;
 
-   //----------------------------------------------------------------
-   // RULE 1 - EXISTING FIXED $0.50 RETRACEMENT
-   //----------------------------------------------------------------
+   // EXISTING $0.50 RETRACEMENT RULE
    double fixedProtectionLevel =
       PeakPositionProfit -
       ProfitRetraceAmount;
 
-   bool fixedRetraceTriggered =
+   bool fixedTriggered =
       (profit <= fixedProtectionLevel);
 
-   //----------------------------------------------------------------
-   // RULE 2 - NEW 50% PEAK PROFIT RETRACEMENT
-   //----------------------------------------------------------------
+   // NEW 50% PEAK PROFIT RETRACEMENT RULE
    double percentageProtectionLevel =
       PeakPositionProfit *
       (1.0 - ProfitRetracePercent / 100.0);
 
-   bool percentageRetraceTriggered =
+   bool percentageTriggered =
       (profit <= percentageProtectionLevel);
 
-   //----------------------------------------------------------------
-   // CLOSE IF EITHER PROTECTION RULE IS TRIGGERED.
-   //----------------------------------------------------------------
-   if(fixedRetraceTriggered ||
-      percentageRetraceTriggered)
+   // Either protection can close the trade.
+   if(fixedTriggered ||
+      percentageTriggered)
    {
-      string triggerReason = "";
+      string reason = "";
 
-      if(fixedRetraceTriggered &&
-         percentageRetraceTriggered)
+      if(fixedTriggered &&
+         percentageTriggered)
       {
-         triggerReason =
-            "BOTH FIXED AND 50% RETRACE";
+         reason = "BOTH PROTECTIONS";
       }
-      else if(fixedRetraceTriggered)
+      else if(fixedTriggered)
       {
-         triggerReason =
-            "FIXED $ RETRACE";
+         reason = "FIXED $0.50 RETRACE";
       }
       else
       {
-         triggerReason =
-            "50% PEAK PROFIT RETRACE";
+         reason = "50% PEAK PROFIT RETRACE";
       }
 
       if(EnableExpertLogs)
       {
-         Print("M1 SCALPER: PROFIT PROTECTION TRIGGERED | Reason=",
-               triggerReason,
+         Print("M1 SCALPER: PROFIT PROTECTION TRIGGERED | ",
+               reason,
                " | Current=$",
                DoubleToString(profit,2),
                " | Peak=$",
@@ -1581,8 +1648,7 @@ void ManageProfitRetrace()
                " | Fixed Level=$",
                DoubleToString(fixedProtectionLevel,2),
                " | 50% Level=$",
-               DoubleToString(percentageProtectionLevel,2),
-               " | Closing position");
+               DoubleToString(percentageProtectionLevel,2));
       }
 
       bool closed =
@@ -1594,11 +1660,11 @@ void ManageProfitRetrace()
          {
             Print("M1 SCALPER: PROFIT PROTECTED | Ticket=",
                   ticket,
-                  " | Closed at approximately $",
-                  DoubleToString(profit,2),
-                  " | Trigger=",
-                  triggerReason);
+                  " | Approx Profit=$",
+                  DoubleToString(profit,2));
          }
+
+         ResetProfitTracker();
       }
       else
       {
@@ -1611,17 +1677,13 @@ void ManageProfitRetrace()
                   " | ",
                   trade.ResultRetcodeDescription());
          }
-
-         return;
       }
-
-      ResetProfitTracker();
    }
 }
 
-//-------------------------------------------------------------------
-// LOG EXPERT STATUS
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| EXPERT STATUS                                                    |
+//+------------------------------------------------------------------+
 void LogExpertStatus()
 {
    if(!EnableExpertLogs)
@@ -1630,12 +1692,10 @@ void LogExpertStatus()
    datetime now =
       TimeCurrent();
 
-   if(ExpertLogIntervalSeconds > 0)
-   {
-      if((now - LastExpertLogTime) <
-         ExpertLogIntervalSeconds)
-         return;
-   }
+   if(ExpertLogIntervalSeconds > 0 &&
+      (now - LastExpertLogTime) <
+      ExpertLogIntervalSeconds)
+      return;
 
    LastExpertLogTime = now;
 
@@ -1653,8 +1713,7 @@ void LogExpertStatus()
    if(CurrentTrend == TREND_SELL)
       trendText = "SELL";
 
-   string state =
-      "SCANNING";
+   string state = "SCANNING";
 
    if(!TradingEnabled)
       state = "STOPPED";
@@ -1680,13 +1739,15 @@ void LogExpertStatus()
          DoubleToString(sellScore,1),
          "% | Open=",
          CountOpenPositions(),
-         " | ConsecutiveLosses=",
+         " | Risk/Trade=",
+         DoubleToString(MaximumRiskPercentPerTrade,2),
+         "% | Losses=",
          ConsecutiveLosses);
 }
 
-//-------------------------------------------------------------------
-// LOG ENTRY BLOCK REASON
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| ENTRY BLOCK REASON                                               |
+//+------------------------------------------------------------------+
 void LogEntryBlockReason()
 {
    if(!EnableExpertLogs)
@@ -1695,18 +1756,16 @@ void LogEntryBlockReason()
    datetime now =
       TimeCurrent();
 
-   if(ExpertLogIntervalSeconds > 0)
-   {
-      if((now - LastExpertLogTime) <
-         ExpertLogIntervalSeconds)
-         return;
-   }
+   if(ExpertLogIntervalSeconds > 0 &&
+      (now - LastExpertLogTime) <
+      ExpertLogIntervalSeconds)
+      return;
 
    LastExpertLogTime = now;
 
    if(!TradingEnabled)
    {
-      Print("M1 SCALPER: WAITING | Trading is STOPPED | Press START to enable new entries");
+      Print("M1 SCALPER: WAITING | Trading STOPPED | Press START");
       return;
    }
 
@@ -1744,9 +1803,9 @@ void LogEntryBlockReason()
    LogExpertStatus();
 }
 
-//-------------------------------------------------------------------
-// UPDATE CONSECUTIVE LOSSES
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| CONSECUTIVE LOSS TRACKING                                        |
+//+------------------------------------------------------------------+
 void UpdateConsecutiveLossesFromDeal(
    ulong dealTicket)
 {
@@ -1760,7 +1819,6 @@ void UpdateConsecutiveLossesFromDeal(
       HistoryDealGetInteger(dealTicket,
                             DEAL_ENTRY);
 
-   // Only count deals that close a position.
    if(dealEntry != DEAL_ENTRY_OUT &&
       dealEntry != DEAL_ENTRY_OUT_BY)
       return;
@@ -1807,6 +1865,6 @@ void UpdateConsecutiveLossesFromDeal(
    }
 }
 
-//-------------------------------------------------------------------
-// END OF EA
-//-------------------------------------------------------------------
+//+------------------------------------------------------------------+
+//| END OF EA                                                        |
+//+------------------------------------------------------------------+
