@@ -1,9 +1,9 @@
 //+------------------------------------------------------------------+
-//|             AXIOM GOLD FAST SCALPER v1.20                       |
-//|             Fast M1 Gold Scalping EA                            |
+//|              AXIOM GOLD FAST SCALPER v1.30                      |
+//|              Fast M1 Gold Scalping EA                           |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.20"
+#property version   "1.30"
 
 #include <Trade/Trade.mqh>
 
@@ -13,45 +13,50 @@ CTrade trade;
 // INPUTS
 //==================================================================
 
-input bool   StartTradingOnAttach      = false;
-input long   MagicNumber               = 26092027;
-input int    SlippagePoints            = 20;
+input bool   StartTradingOnAttach       = false;
+input long   MagicNumber                = 26092027;
+input int    SlippagePoints             = 20;
 
-input ENUM_TIMEFRAMES SignalTimeframe  = PERIOD_M1;
+input ENUM_TIMEFRAMES SignalTimeframe   = PERIOD_M1;
 
 //--- Signal engine
-input int    FastEMA                   = 9;
-input int    SlowEMA                   = 21;
-input int    RSIPeriod                 = 14;
+input int    FastEMA                    = 9;
+input int    SlowEMA                    = 21;
+input int    RSIPeriod                  = 14;
 
-input double BuyRSILevel               = 52.0;
-input double SellRSILevel              = 48.0;
-input double MinimumSignalScore        = 70.0;
+input double BuyRSILevel                = 52.0;
+input double SellRSILevel               = 48.0;
+
+input double MinimumSignalScore         = 70.0;
+
+//--- Stronger confirmation for additions
+input double MinimumAddSignalScore      = 80.0;
 
 //--- Progressive entries
-input double StartingLot               = 0.01;
-input double LotMultiplier             = 2.0;
+input double StartingLot                = 0.01;
+input double LotMultiplier              = 2.0;
 
-input int    MaximumOpenPositions      = 6;
-input double MaximumTotalLots          = 0.64;
+input int    MaximumOpenPositions       = 6;
+input double MaximumTotalLots           = 0.64;
 
-input int    AddDistancePoints         = 300;
-input bool   RequireSignalForAdd       = true;
+input int    AddDistancePoints          = 300;
+input bool   RequireSignalForAdd        = true;
 
-//--- Basket protection
-input double BasketProfitTarget        = 2.00;
-input double BasketProfitRetrace       = 0.50;
-input bool   UseProfitRetrace          = true;
+//--- Basket profit protection
+input double BasketProfitTarget         = 2.00;
+input double BasketProfitRetrace        = 0.50;
+input double BasketProfitRetracePercent = 50.0;
 
-//--- Per-trade emergency protection
+input bool   UseProfitRetrace            = true;
+
+//--- Maximum risk per individual trade
 input double MaximumRiskPercentPerTrade = 0.50;
 
-//--- Account emergency protection
-input double MaximumDrawdownPercent    = 5.0;
-input int    MaximumConsecutiveLosses  = 3;
+//--- Emergency account protection
+input double MaximumDrawdownPercent     = 5.0;
 
 //--- Expert logging
-input int    StatusIntervalSeconds     = 3;
+input int    StatusIntervalSeconds      = 3;
 
 //==================================================================
 // GLOBAL VARIABLES
@@ -66,12 +71,10 @@ bool TradingEnabled = false;
 double DayStartBalance = 0.0;
 
 double BasketPeakProfit = 0.0;
-bool BasketPeakActive = false;
-
-int ConsecutiveLosses = 0;
+bool   BasketPeakActive = false;
 
 datetime LastStatusTime = 0;
-datetime LastTickLogTime = 0;
+datetime LastBlockLogTime = 0;
 
 //==================================================================
 // FUNCTION DECLARATIONS
@@ -83,7 +86,7 @@ void DeleteControlButtons();
 void CheckAccountProtection();
 void CheckTradingSignals();
 
-int  GetMarketDirection();
+int    GetMarketDirection();
 double GetBuyScore();
 double GetSellScore();
 
@@ -93,15 +96,16 @@ bool CheckAdditionalEntry();
 double CalculateNextLot(int level);
 double NormalizeLot(double lot);
 
-int CountEAOpenPositions();
+int    CountEAOpenPositions();
 double GetEAOpenLots();
 
-ulong GetNewestPositionTicket();
+ulong  GetNewestPositionTicket();
 double GetNewestPositionPrice();
 
 bool OpenProgressiveTrade(int direction);
 
 double CalculateRiskMoney();
+
 bool CalculateSafeStopLoss(
    ENUM_ORDER_TYPE orderType,
    double volume,
@@ -113,16 +117,14 @@ double GetMinimumStopDistance();
 void ManageBasket();
 void CloseProfitableBasket();
 
+double GetBasketProfit();
+
 void LogExpertStatus();
 void LogEntryBlockReason(string reason);
 
-void CheckConsecutiveLossProtection();
-
-void CheckNewTradingDay();
-
 bool IsOurPosition(ulong ticket);
 
-double GetBasketProfit();
+void CheckNewTradingDay();
 
 //==================================================================
 // ON INIT
@@ -134,6 +136,7 @@ int OnInit()
    trade.SetDeviationInPoints(SlippagePoints);
    trade.SetAsyncMode(false);
 
+   //--- Create EMA indicators
    FastEMAHandle = iMA(
       _Symbol,
       SignalTimeframe,
@@ -152,6 +155,7 @@ int OnInit()
       PRICE_CLOSE
    );
 
+   //--- Create RSI indicator
    RSIHandle = iRSI(
       _Symbol,
       SignalTimeframe,
@@ -163,29 +167,44 @@ int OnInit()
       SlowEMAHandle == INVALID_HANDLE ||
       RSIHandle == INVALID_HANDLE)
    {
-      Print("AXIOM ERROR: Indicator handle creation failed.");
+      Print("AXIOM ERROR: Indicator initialization failed.");
       return(INIT_FAILED);
    }
 
-   DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   DayStartBalance =
+      AccountInfoDouble(ACCOUNT_BALANCE);
 
    CreateControlButtons();
 
-   TradingEnabled = StartTradingOnAttach;
+   TradingEnabled =
+      StartTradingOnAttach;
 
    Print("==================================================");
-   Print("AXIOM GOLD FAST SCALPER v1.20 INITIALIZED");
-   Print("Symbol: ", _Symbol);
-   Print("Timeframe: M1");
-   Print("Daily loss protection: REMOVED");
-   Print("Manual daily loss control: ENABLED");
-   Print("Maximum drawdown: ", MaximumDrawdownPercent, "%");
-   Print("Maximum consecutive losses: ",
-         MaximumConsecutiveLosses);
+   Print("AXIOM GOLD FAST SCALPER v1.30");
+   Print("INITIALIZED");
+   Print("Symbol: ",_Symbol);
+   Print("Signal timeframe: M1");
+   Print("Daily loss limiter: REMOVED");
+   Print("Consecutive loss limiter: REMOVED");
+   Print("Maximum drawdown: ",
+         DoubleToString(
+            MaximumDrawdownPercent,2),
+         "%");
    Print("Risk per trade: ",
-         MaximumRiskPercentPerTrade, "%");
+         DoubleToString(
+            MaximumRiskPercentPerTrade,2),
+         "%");
+   Print("Profit retrace: ",
+         DoubleToString(
+            BasketProfitRetrace,2));
+   Print("Profit retrace percentage: ",
+         DoubleToString(
+            BasketProfitRetracePercent,1),
+         "%");
    Print("Trading state: ",
-         TradingEnabled ? "STARTED" : "STOPPED");
+         TradingEnabled ?
+         "STARTED" :
+         "STOPPED");
    Print("==================================================");
 
    return(INIT_SUCCEEDED);
@@ -208,7 +227,7 @@ void OnDeinit(const int reason)
 
    DeleteControlButtons();
 
-   Print("AXIOM stopped. Reason: ", reason);
+   Print("AXIOM stopped. Reason = ",reason);
 }
 
 //==================================================================
@@ -219,23 +238,20 @@ void OnTick()
 {
    CheckNewTradingDay();
 
-   // Always manage open positions
+   //--- Always manage existing positions
    ManageBasket();
 
-   // Emergency account protection
+   //--- Emergency drawdown protection
    CheckAccountProtection();
 
-   // Consecutive loss protection
-   CheckConsecutiveLossProtection();
-
-   // Display progress
+   //--- Show Expert progress
    LogExpertStatus();
 
-   // STOP means no new entries
+   //--- STOP prevents new entries
    if(!TradingEnabled)
       return;
 
-   // Check for first/additional trade immediately
+   //--- Scan immediately on every tick
    CheckTradingSignals();
 }
 
@@ -248,12 +264,16 @@ void CheckNewTradingDay()
    static int storedDay = -1;
 
    MqlDateTime tm;
-   TimeToStruct(TimeCurrent(), tm);
+   TimeToStruct(TimeCurrent(),tm);
 
    if(storedDay == -1)
    {
       storedDay = tm.day;
-      DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+      DayStartBalance =
+         AccountInfoDouble(
+            ACCOUNT_BALANCE);
+
       return;
    }
 
@@ -261,21 +281,22 @@ void CheckNewTradingDay()
    {
       storedDay = tm.day;
 
-      DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-
-      ConsecutiveLosses = 0;
+      DayStartBalance =
+         AccountInfoDouble(
+            ACCOUNT_BALANCE);
 
       BasketPeakProfit = 0.0;
       BasketPeakActive = false;
 
-      Print("AXIOM: New trading day detected.");
-      Print("AXIOM: New day starting balance = ",
-            DoubleToString(DayStartBalance,2));
+      Print("AXIOM: New trading day.");
+      Print("Starting balance = $",
+            DoubleToString(
+               DayStartBalance,2));
    }
 }
 
 //==================================================================
-// ACCOUNT PROTECTION
+// EMERGENCY DRAWDOWN PROTECTION
 //==================================================================
 
 void CheckAccountProtection()
@@ -283,13 +304,16 @@ void CheckAccountProtection()
    if(MaximumDrawdownPercent <= 0.0)
       return;
 
-   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-
    if(DayStartBalance <= 0.0)
       return;
 
+   double equity =
+      AccountInfoDouble(
+         ACCOUNT_EQUITY);
+
    double drawdown =
-      ((DayStartBalance - equity) / DayStartBalance) * 100.0;
+      ((DayStartBalance - equity)
+      / DayStartBalance) * 100.0;
 
    if(drawdown >= MaximumDrawdownPercent)
    {
@@ -297,40 +321,20 @@ void CheckAccountProtection()
       {
          TradingEnabled = false;
 
-         Print("AXIOM EMERGENCY PROTECTION");
-         Print("Drawdown = ",
-               DoubleToString(drawdown,2),
+         Print("AXIOM EMERGENCY DRAWDOWN");
+         Print("Current drawdown = ",
+               DoubleToString(
+                  drawdown,2),
                "%");
-         Print("New entries BLOCKED.");
-         Print("Existing positions remain under basket management.");
+
+         Print("NEW ENTRIES BLOCKED.");
+         Print("Existing positions remain managed.");
       }
    }
 }
 
 //==================================================================
-// CONSECUTIVE LOSS PROTECTION
-//==================================================================
-
-void CheckConsecutiveLossProtection()
-{
-   if(MaximumConsecutiveLosses <= 0)
-      return;
-
-   if(ConsecutiveLosses >= MaximumConsecutiveLosses)
-   {
-      if(TradingEnabled)
-      {
-         TradingEnabled = false;
-
-         Print("AXIOM: Maximum consecutive losses reached.");
-         Print("Loss streak = ", ConsecutiveLosses);
-         Print("New entries BLOCKED.");
-      }
-   }
-}
-
-//==================================================================
-// CONTROL BUTTONS
+// CREATE START / STOP BUTTONS
 //==================================================================
 
 void CreateControlButtons()
@@ -432,12 +436,19 @@ void CreateControlButtons()
 
 void DeleteControlButtons()
 {
-   ObjectDelete(0,"AXIOM_START");
-   ObjectDelete(0,"AXIOM_STOP");
+   ObjectDelete(
+      0,
+      "AXIOM_START"
+   );
+
+   ObjectDelete(
+      0,
+      "AXIOM_STOP"
+   );
 }
 
 //==================================================================
-// CHART EVENTS
+// BUTTON EVENTS
 //==================================================================
 
 void OnChartEvent(
@@ -454,17 +465,17 @@ void OnChartEvent(
    {
       TradingEnabled = true;
 
-      Print("AXIOM START pressed.");
-      Print("New entries are ENABLED.");
+      Print("AXIOM: START pressed.");
+      Print("New entries ENABLED.");
    }
 
    if(sparam == "AXIOM_STOP")
    {
       TradingEnabled = false;
 
-      Print("AXIOM STOP pressed.");
-      Print("New entries are DISABLED.");
-      Print("Existing positions remain under protection.");
+      Print("AXIOM: STOP pressed.");
+      Print("New entries DISABLED.");
+      Print("Existing positions remain managed.");
    }
 }//==================================================================
 // MARKET DIRECTION
@@ -476,26 +487,42 @@ int GetMarketDirection()
    double slow[1];
    double rsi[1];
 
-   if(CopyBuffer(FastEMAHandle,0,0,1,fast) != 1)
+   if(CopyBuffer(
+         FastEMAHandle,
+         0,
+         0,
+         1,
+         fast) != 1)
       return 0;
 
-   if(CopyBuffer(SlowEMAHandle,0,0,1,slow) != 1)
+   if(CopyBuffer(
+         SlowEMAHandle,
+         0,
+         0,
+         1,
+         slow) != 1)
       return 0;
 
-   if(CopyBuffer(RSIHandle,0,0,1,rsi) != 1)
+   if(CopyBuffer(
+         RSIHandle,
+         0,
+         0,
+         1,
+         rsi) != 1)
       return 0;
 
-   double bid = SymbolInfoDouble(
-      _Symbol,
-      SYMBOL_BID
-   );
+   double bid =
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_BID);
 
-   double ask = SymbolInfoDouble(
-      _Symbol,
-      SYMBOL_ASK
-   );
+   double ask =
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_ASK);
 
-   double mid = (bid + ask) / 2.0;
+   double mid =
+      (bid + ask) / 2.0;
 
    if(fast[0] > slow[0] &&
       mid > fast[0] &&
@@ -526,53 +553,69 @@ double GetBuyScore()
    double slow[1];
    double rsi[1];
 
-   if(CopyBuffer(FastEMAHandle,0,0,1,fast) != 1)
+   if(CopyBuffer(
+         FastEMAHandle,
+         0,
+         0,
+         1,
+         fast) != 1)
       return 0.0;
 
-   if(CopyBuffer(SlowEMAHandle,0,0,1,slow) != 1)
+   if(CopyBuffer(
+         SlowEMAHandle,
+         0,
+         0,
+         1,
+         slow) != 1)
       return 0.0;
 
-   if(CopyBuffer(RSIHandle,0,0,1,rsi) != 1)
+   if(CopyBuffer(
+         RSIHandle,
+         0,
+         0,
+         1,
+         rsi) != 1)
       return 0.0;
 
-   double bid = SymbolInfoDouble(
-      _Symbol,
-      SYMBOL_BID
-   );
+   double bid =
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_BID);
 
-   double ask = SymbolInfoDouble(
-      _Symbol,
-      SYMBOL_ASK
-   );
+   double ask =
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_ASK);
 
-   double mid = (bid + ask) / 2.0;
+   double mid =
+      (bid + ask) / 2.0;
 
-   // EMA trend
+   //--- Trend
    if(fast[0] > slow[0])
       score += 35.0;
 
-   // Price above fast EMA
+   //--- Price position
    if(mid > fast[0])
       score += 20.0;
 
-   // RSI confirmation
+   //--- RSI
    if(rsi[0] >= BuyRSILevel)
       score += 30.0;
 
-   // Current forming candle momentum
-   double open0 = iOpen(
-      _Symbol,
-      SignalTimeframe,
-      0
-   );
+   //--- Current candle momentum
+   double candleOpen =
+      iOpen(
+         _Symbol,
+         SignalTimeframe,
+         0);
 
-   double close0 = iClose(
-      _Symbol,
-      SignalTimeframe,
-      0
-   );
+   double candleClose =
+      iClose(
+         _Symbol,
+         SignalTimeframe,
+         0);
 
-   if(close0 > open0)
+   if(candleClose > candleOpen)
       score += 15.0;
 
    return score;
@@ -590,65 +633,82 @@ double GetSellScore()
    double slow[1];
    double rsi[1];
 
-   if(CopyBuffer(FastEMAHandle,0,0,1,fast) != 1)
+   if(CopyBuffer(
+         FastEMAHandle,
+         0,
+         0,
+         1,
+         fast) != 1)
       return 0.0;
 
-   if(CopyBuffer(SlowEMAHandle,0,0,1,slow) != 1)
+   if(CopyBuffer(
+         SlowEMAHandle,
+         0,
+         0,
+         1,
+         slow) != 1)
       return 0.0;
 
-   if(CopyBuffer(RSIHandle,0,0,1,rsi) != 1)
+   if(CopyBuffer(
+         RSIHandle,
+         0,
+         0,
+         1,
+         rsi) != 1)
       return 0.0;
 
-   double bid = SymbolInfoDouble(
-      _Symbol,
-      SYMBOL_BID
-   );
+   double bid =
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_BID);
 
-   double ask = SymbolInfoDouble(
-      _Symbol,
-      SYMBOL_ASK
-   );
+   double ask =
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_ASK);
 
-   double mid = (bid + ask) / 2.0;
+   double mid =
+      (bid + ask) / 2.0;
 
-   // EMA trend
+   //--- Trend
    if(fast[0] < slow[0])
       score += 35.0;
 
-   // Price below fast EMA
+   //--- Price position
    if(mid < fast[0])
       score += 20.0;
 
-   // RSI confirmation
+   //--- RSI
    if(rsi[0] <= SellRSILevel)
       score += 30.0;
 
-   // Current forming candle momentum
-   double open0 = iOpen(
-      _Symbol,
-      SignalTimeframe,
-      0
-   );
+   //--- Current candle momentum
+   double candleOpen =
+      iOpen(
+         _Symbol,
+         SignalTimeframe,
+         0);
 
-   double close0 = iClose(
-      _Symbol,
-      SignalTimeframe,
-      0
-   );
+   double candleClose =
+      iClose(
+         _Symbol,
+         SignalTimeframe,
+         0);
 
-   if(close0 < open0)
+   if(candleClose < candleOpen)
       score += 15.0;
 
    return score;
 }
 
 //==================================================================
-// CHECK SIGNALS
+// CHECK TRADING SIGNALS
 //==================================================================
 
 void CheckTradingSignals()
 {
-   int positions = CountEAOpenPositions();
+   int positions =
+      CountEAOpenPositions();
 
    if(positions <= 0)
    {
@@ -665,32 +725,40 @@ void CheckTradingSignals()
 
 bool CheckFirstEntry()
 {
-   double buyScore = GetBuyScore();
-   double sellScore = GetSellScore();
+   double buyScore =
+      GetBuyScore();
 
+   double sellScore =
+      GetSellScore();
+
+   //--- No sufficient confirmation
    if(buyScore < MinimumSignalScore &&
       sellScore < MinimumSignalScore)
    {
       return false;
    }
 
-   if(buyScore > sellScore &&
-      buyScore >= MinimumSignalScore)
+   //--- BUY
+   if(buyScore >= MinimumSignalScore &&
+      buyScore > sellScore)
    {
-      Print("AXIOM SIGNAL: BUY");
+      Print("AXIOM: BUY confirmation.");
       Print("BUY score = ",
-            DoubleToString(buyScore,1),
+            DoubleToString(
+               buyScore,1),
             "%");
 
       return OpenProgressiveTrade(1);
    }
 
-   if(sellScore > buyScore &&
-      sellScore >= MinimumSignalScore)
+   //--- SELL
+   if(sellScore >= MinimumSignalScore &&
+      sellScore > buyScore)
    {
-      Print("AXIOM SIGNAL: SELL");
+      Print("AXIOM: SELL confirmation.");
       Print("SELL score = ",
-            DoubleToString(sellScore,1),
+            DoubleToString(
+               sellScore,1),
             "%");
 
       return OpenProgressiveTrade(-1);
@@ -705,125 +773,170 @@ bool CheckFirstEntry()
 
 bool CheckAdditionalEntry()
 {
-   int count = CountEAOpenPositions();
+   int count =
+      CountEAOpenPositions();
 
    if(count >= MaximumOpenPositions)
    {
       LogEntryBlockReason(
-         "Maximum open positions reached"
-      );
+         "Maximum positions reached");
 
       return false;
    }
 
-   double totalLots = GetEAOpenLots();
+   double totalLots =
+      GetEAOpenLots();
 
    if(totalLots >= MaximumTotalLots)
    {
       LogEntryBlockReason(
-         "Maximum total lots reached"
-      );
+         "Maximum total lots reached");
 
       return false;
    }
 
-   ulong newestTicket = GetNewestPositionTicket();
+   ulong newestTicket =
+      GetNewestPositionTicket();
 
    if(newestTicket == 0)
       return false;
 
-   if(!PositionSelectByTicket(newestTicket))
+   if(!PositionSelectByTicket(
+         newestTicket))
       return false;
 
    ENUM_POSITION_TYPE newestType =
       (ENUM_POSITION_TYPE)
-      PositionGetInteger(POSITION_TYPE);
+      PositionGetInteger(
+         POSITION_TYPE);
 
    double newestPrice =
-      PositionGetDouble(POSITION_PRICE_OPEN);
+      PositionGetDouble(
+         POSITION_PRICE_OPEN);
 
-   double bid = SymbolInfoDouble(
-      _Symbol,
-      SYMBOL_BID
-   );
+   double bid =
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_BID);
 
-   double ask = SymbolInfoDouble(
-      _Symbol,
-      SYMBOL_ASK
-   );
+   double ask =
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_ASK);
 
-   double point = SymbolInfoDouble(
-      _Symbol,
-      SYMBOL_POINT
-   );
+   double point =
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_POINT);
 
    if(point <= 0.0)
       return false;
 
-   double distancePoints = 0.0;
+   double adverseDistance =
+      0.0;
 
+   //--- BUY position
    if(newestType == POSITION_TYPE_BUY)
    {
-      distancePoints =
-         (newestPrice - bid) / point;
-   }
-   else
-   {
-      distancePoints =
-         (ask - newestPrice) / point;
+      adverseDistance =
+         (newestPrice - bid)
+         / point;
    }
 
-   // Do not add before required distance
-   if(distancePoints < AddDistancePoints)
+   //--- SELL position
+   if(newestType == POSITION_TYPE_SELL)
+   {
+      adverseDistance =
+         (ask - newestPrice)
+         / point;
+   }
+
+   //--- Price has not moved enough
+   if(adverseDistance < AddDistancePoints)
       return false;
 
-   double buyScore = GetBuyScore();
-   double sellScore = GetSellScore();
+   double buyScore =
+      GetBuyScore();
 
-   // BUY basket
+   double sellScore =
+      GetSellScore();
+
+   //==============================================================
+   // BUY ADD
+   //==============================================================
+
    if(newestType == POSITION_TYPE_BUY)
    {
+      // Strong confirmation required
       if(RequireSignalForAdd)
       {
-         if(buyScore < MinimumSignalScore ||
-            buyScore <= sellScore)
+         if(buyScore < MinimumAddSignalScore)
          {
             LogEntryBlockReason(
-               "BUY add waiting for live confirmation"
-            );
+               "BUY add needs stronger confirmation");
+
+            return false;
+         }
+
+         if(buyScore <= sellScore)
+         {
+            LogEntryBlockReason(
+               "BUY add rejected: SELL stronger");
 
             return false;
          }
       }
 
-      Print("AXIOM: BUY add distance reached.");
-      Print("Distance = ",
-            DoubleToString(distancePoints,0),
+      Print("AXIOM: BUY add confirmed.");
+      Print("Adverse distance = ",
+            DoubleToString(
+               adverseDistance,0),
             " points");
+
+      Print("BUY score = ",
+            DoubleToString(
+               buyScore,1),
+            "%");
 
       return OpenProgressiveTrade(1);
    }
 
-   // SELL basket
+   //==============================================================
+   // SELL ADD
+   //==============================================================
+
    if(newestType == POSITION_TYPE_SELL)
    {
+      // Strong confirmation required
       if(RequireSignalForAdd)
       {
-         if(sellScore < MinimumSignalScore ||
-            sellScore <= buyScore)
+         if(sellScore < MinimumAddSignalScore)
          {
             LogEntryBlockReason(
-               "SELL add waiting for live confirmation"
-            );
+               "SELL add needs stronger confirmation");
+
+            return false;
+         }
+
+         if(sellScore <= buyScore)
+         {
+            LogEntryBlockReason(
+               "SELL add rejected: BUY stronger");
 
             return false;
          }
       }
 
-      Print("AXIOM: SELL add distance reached.");
-      Print("Distance = ",
-            DoubleToString(distancePoints,0),
+      Print("AXIOM: SELL add confirmed.");
+      Print("Adverse distance = ",
+            DoubleToString(
+               adverseDistance,0),
             " points");
+
+      Print("SELL score = ",
+            DoubleToString(
+               sellScore,1),
+            "%");
 
       return OpenProgressiveTrade(-1);
    }
@@ -832,14 +945,16 @@ bool CheckAdditionalEntry()
 }
 
 //==================================================================
-// LOT CALCULATION
+// CALCULATE NEXT LOT
 //==================================================================
 
 double CalculateNextLot(int level)
 {
    double lot =
       StartingLot *
-      MathPow(LotMultiplier, level);
+      MathPow(
+         LotMultiplier,
+         level);
 
    return NormalizeLot(lot);
 }
@@ -850,20 +965,20 @@ double CalculateNextLot(int level)
 
 double NormalizeLot(double lot)
 {
-   double minLot = SymbolInfoDouble(
-      _Symbol,
-      SYMBOL_VOLUME_MIN
-   );
+   double minLot =
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_VOLUME_MIN);
 
-   double maxLot = SymbolInfoDouble(
-      _Symbol,
-      SYMBOL_VOLUME_MAX
-   );
+   double maxLot =
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_VOLUME_MAX);
 
-   double step = SymbolInfoDouble(
-      _Symbol,
-      SYMBOL_VOLUME_STEP
-   );
+   double step =
+      SymbolInfoDouble(
+         _Symbol,
+         SYMBOL_VOLUME_STEP);
 
    if(step <= 0.0)
       step = 0.01;
@@ -874,7 +989,9 @@ double NormalizeLot(double lot)
    if(lot > maxLot)
       lot = maxLot;
 
-   lot = MathFloor(lot / step) * step;
+   lot =
+      MathFloor(
+         lot / step) * step;
 
    int digits = 2;
 
@@ -882,21 +999,23 @@ double NormalizeLot(double lot)
       digits = 0;
    else if(step >= 0.1)
       digits = 1;
-   else
-      digits = 2;
 
-   return NormalizeDouble(lot,digits);
+   return NormalizeDouble(
+      lot,
+      digits);
 }
 
 //==================================================================
-// COUNT EA POSITIONS
+// COUNT POSITIONS
 //==================================================================
 
 int CountEAOpenPositions()
 {
    int count = 0;
 
-   for(int i=PositionsTotal()-1; i>=0; i--)
+   for(int i=PositionsTotal()-1;
+       i>=0;
+       i--)
    {
       ulong ticket =
          PositionGetTicket(i);
@@ -904,15 +1023,18 @@ int CountEAOpenPositions()
       if(ticket == 0)
          continue;
 
-      if(!PositionSelectByTicket(ticket))
+      if(!PositionSelectByTicket(
+            ticket))
          continue;
 
-      if(PositionGetString(POSITION_SYMBOL)
+      if(PositionGetString(
+            POSITION_SYMBOL)
          != _Symbol)
          continue;
 
       if((long)PositionGetInteger(
-         POSITION_MAGIC) != MagicNumber)
+            POSITION_MAGIC)
+         != MagicNumber)
          continue;
 
       count++;
@@ -922,14 +1044,16 @@ int CountEAOpenPositions()
 }
 
 //==================================================================
-// TOTAL EA LOTS
+// TOTAL LOTS
 //==================================================================
 
 double GetEAOpenLots()
 {
    double total = 0.0;
 
-   for(int i=PositionsTotal()-1; i>=0; i--)
+   for(int i=PositionsTotal()-1;
+       i>=0;
+       i--)
    {
       ulong ticket =
          PositionGetTicket(i);
@@ -937,26 +1061,30 @@ double GetEAOpenLots()
       if(ticket == 0)
          continue;
 
-      if(!PositionSelectByTicket(ticket))
+      if(!PositionSelectByTicket(
+            ticket))
          continue;
 
-      if(PositionGetString(POSITION_SYMBOL)
+      if(PositionGetString(
+            POSITION_SYMBOL)
          != _Symbol)
          continue;
 
       if((long)PositionGetInteger(
-         POSITION_MAGIC) != MagicNumber)
+            POSITION_MAGIC)
+         != MagicNumber)
          continue;
 
-      total += PositionGetDouble(
-         POSITION_VOLUME);
+      total +=
+         PositionGetDouble(
+            POSITION_VOLUME);
    }
 
    return total;
 }
 
 //==================================================================
-// NEWEST POSITION
+// NEWEST POSITION TICKET
 //==================================================================
 
 ulong GetNewestPositionTicket()
@@ -964,7 +1092,9 @@ ulong GetNewestPositionTicket()
    ulong newestTicket = 0;
    long newestTime = 0;
 
-   for(int i=PositionsTotal()-1; i>=0; i--)
+   for(int i=PositionsTotal()-1;
+       i>=0;
+       i--)
    {
       ulong ticket =
          PositionGetTicket(i);
@@ -972,24 +1102,27 @@ ulong GetNewestPositionTicket()
       if(ticket == 0)
          continue;
 
-      if(!PositionSelectByTicket(ticket))
+      if(!PositionSelectByTicket(
+            ticket))
          continue;
 
-      if(PositionGetString(POSITION_SYMBOL)
+      if(PositionGetString(
+            POSITION_SYMBOL)
          != _Symbol)
          continue;
 
       if((long)PositionGetInteger(
-         POSITION_MAGIC) != MagicNumber)
+            POSITION_MAGIC)
+         != MagicNumber)
          continue;
 
-      long timeValue =
+      long positionTime =
          (long)PositionGetInteger(
             POSITION_TIME_MSC);
 
-      if(timeValue > newestTime)
+      if(positionTime > newestTime)
       {
-         newestTime = timeValue;
+         newestTime = positionTime;
          newestTicket = ticket;
       }
    }
@@ -1003,12 +1136,14 @@ ulong GetNewestPositionTicket()
 
 double GetNewestPositionPrice()
 {
-   ulong ticket = GetNewestPositionTicket();
+   ulong ticket =
+      GetNewestPositionTicket();
 
    if(ticket == 0)
       return 0.0;
 
-   if(!PositionSelectByTicket(ticket))
+   if(!PositionSelectByTicket(
+         ticket))
       return 0.0;
 
    return PositionGetDouble(
@@ -1016,21 +1151,23 @@ double GetNewestPositionPrice()
 }
 
 //==================================================================
-// CALCULATE RISK MONEY
+// RISK MONEY
 //==================================================================
 
 double CalculateRiskMoney()
 {
    double balance =
-      AccountInfoDouble(ACCOUNT_BALANCE);
+      AccountInfoDouble(
+         ACCOUNT_BALANCE);
 
-   return balance *
-          MaximumRiskPercentPerTrade /
-          100.0;
+   return
+      balance *
+      MaximumRiskPercentPerTrade /
+      100.0;
 }
 
 //==================================================================
-// MINIMUM STOP DISTANCE
+// MINIMUM BROKER STOP DISTANCE
 //==================================================================
 
 double GetMinimumStopDistance()
@@ -1054,13 +1191,16 @@ double GetMinimumStopDistance()
          SYMBOL_TRADE_FREEZE_LEVEL);
 
    long required =
-      MathMax(stopsLevel,freezeLevel);
+      MathMax(
+         stopsLevel,
+         freezeLevel);
 
    required += 10;
 
-   return required * point;
+   return
+      required * point;
 }//==================================================================
-// SAFE STOP LOSS CALCULATION
+// SAFE STOP LOSS
 //==================================================================
 
 bool CalculateSafeStopLoss(
@@ -1082,16 +1222,10 @@ bool CalculateSafeStopLoss(
          _Symbol,
          SYMBOL_TRADE_TICK_VALUE);
 
-   double point =
-      SymbolInfoDouble(
-         _Symbol,
-         SYMBOL_POINT);
-
    if(tickSize <= 0.0 ||
-      tickValue <= 0.0 ||
-      point <= 0.0)
+      tickValue <= 0.0)
    {
-      Print("AXIOM: Cannot calculate safe SL.");
+      Print("AXIOM: Invalid tick information.");
       return false;
    }
 
@@ -1102,13 +1236,13 @@ bool CalculateSafeStopLoss(
       return false;
 
    double priceDistance =
-      (riskMoney * tickSize) /
-      (volume * tickValue);
+      (riskMoney * tickSize)
+      / (volume * tickValue);
 
    double minimumDistance =
       GetMinimumStopDistance();
 
-   // Broker minimum stop distance is enforced
+   //--- Respect broker's minimum distance
    if(priceDistance < minimumDistance)
       priceDistance = minimumDistance;
 
@@ -1127,6 +1261,10 @@ bool CalculateSafeStopLoss(
          _Symbol,
          SYMBOL_DIGITS);
 
+   //==============================================================
+   // BUY STOP
+   //==============================================================
+
    if(orderType == ORDER_TYPE_BUY)
    {
       if(bid <= 0.0)
@@ -1140,10 +1278,18 @@ bool CalculateSafeStopLoss(
       if(stopLoss <= 0.0)
          return false;
 
-      if((bid - stopLoss) < minimumDistance)
+      if((bid - stopLoss)
+         < minimumDistance)
+      {
          return false;
+      }
    }
-   else
+
+   //==============================================================
+   // SELL STOP
+   //==============================================================
+
+   if(orderType == ORDER_TYPE_SELL)
    {
       if(ask <= 0.0)
          return false;
@@ -1156,8 +1302,11 @@ bool CalculateSafeStopLoss(
       if(stopLoss <= 0.0)
          return false;
 
-      if((stopLoss - ask) < minimumDistance)
+      if((stopLoss - ask)
+         < minimumDistance)
+      {
          return false;
+      }
    }
 
    return true;
@@ -1169,28 +1318,34 @@ bool CalculateSafeStopLoss(
 
 bool OpenProgressiveTrade(int direction)
 {
-   int level = CountEAOpenPositions();
+   int level =
+      CountEAOpenPositions();
 
    if(level >= MaximumOpenPositions)
       return false;
 
-   double totalLots = GetEAOpenLots();
+   double currentLots =
+      GetEAOpenLots();
 
    double lot =
       CalculateNextLot(level);
 
-   if(totalLots + lot > MaximumTotalLots)
+   //--- Total exposure protection
+   if(currentLots + lot >
+      MaximumTotalLots)
    {
-      Print("AXIOM: Total lot limit would be exceeded.");
+      Print("AXIOM: Maximum total exposure reached.");
+
       Print("Current lots = ",
-            DoubleToString(totalLots,2));
-      Print("New lot = ",
-            DoubleToString(lot,2));
+            DoubleToString(
+               currentLots,2));
+
+      Print("Requested lot = ",
+            DoubleToString(
+               lot,2));
 
       return false;
    }
-
-   double stopLoss = 0.0;
 
    ENUM_ORDER_TYPE orderType;
 
@@ -1198,6 +1353,8 @@ bool OpenProgressiveTrade(int direction)
       orderType = ORDER_TYPE_BUY;
    else
       orderType = ORDER_TYPE_SELL;
+
+   double stopLoss = 0.0;
 
    if(!CalculateSafeStopLoss(
          orderType,
@@ -1208,11 +1365,16 @@ bool OpenProgressiveTrade(int direction)
       return false;
    }
 
-   bool result = false;
-
    string comment =
       "AXIOM LEVEL " +
-      IntegerToString(level + 1);
+      IntegerToString(
+         level + 1);
+
+   bool result = false;
+
+   //==============================================================
+   // BUY
+   //==============================================================
 
    if(direction > 0)
    {
@@ -1225,7 +1387,12 @@ bool OpenProgressiveTrade(int direction)
             0.0,
             comment);
    }
-   else
+
+   //==============================================================
+   // SELL
+   //==============================================================
+
+   if(direction < 0)
    {
       result =
          trade.Sell(
@@ -1246,19 +1413,24 @@ bool OpenProgressiveTrade(int direction)
       else
          Print("AXIOM FAST SELL EXECUTED");
 
-      Print("Level: ",level + 1);
-      Print("Lot: ",
-            DoubleToString(lot,2));
-      Print("SL: ",
-            DoubleToString(stopLoss,
+      Print("Level = ",
+            level + 1);
+
+      Print("Lot = ",
+            DoubleToString(
+               lot,2));
+
+      Print("Stop Loss = ",
+            DoubleToString(
+               stopLoss,
                (int)SymbolInfoInteger(
                   _Symbol,
                   SYMBOL_DIGITS)));
 
-      Print("Current positions: ",
+      Print("Positions = ",
             CountEAOpenPositions());
 
-      Print("Total lots: ",
+      Print("Total lots = ",
             DoubleToString(
                GetEAOpenLots(),2));
 
@@ -1267,11 +1439,11 @@ bool OpenProgressiveTrade(int direction)
       return true;
    }
 
-   Print("AXIOM TRADE FAILED.");
-   Print("Retcode: ",
+   Print("AXIOM: TRADE FAILED.");
+   Print("Retcode = ",
          trade.ResultRetcode());
 
-   Print("Description: ",
+   Print("Description = ",
          trade.ResultRetcodeDescription());
 
    return false;
@@ -1285,7 +1457,9 @@ double GetBasketProfit()
 {
    double total = 0.0;
 
-   for(int i=PositionsTotal()-1; i>=0; i--)
+   for(int i=PositionsTotal()-1;
+       i>=0;
+       i--)
    {
       ulong ticket =
          PositionGetTicket(i);
@@ -1293,22 +1467,27 @@ double GetBasketProfit()
       if(ticket == 0)
          continue;
 
-      if(!PositionSelectByTicket(ticket))
+      if(!PositionSelectByTicket(
+            ticket))
          continue;
 
-      if(PositionGetString(POSITION_SYMBOL)
+      if(PositionGetString(
+            POSITION_SYMBOL)
          != _Symbol)
          continue;
 
       if((long)PositionGetInteger(
-         POSITION_MAGIC) != MagicNumber)
+            POSITION_MAGIC)
+         != MagicNumber)
          continue;
 
-      total += PositionGetDouble(
-         POSITION_PROFIT);
+      total +=
+         PositionGetDouble(
+            POSITION_PROFIT);
 
-      total += PositionGetDouble(
-         POSITION_SWAP);
+      total +=
+         PositionGetDouble(
+            POSITION_SWAP);
    }
 
    return total;
@@ -1320,7 +1499,8 @@ double GetBasketProfit()
 
 void ManageBasket()
 {
-   int count = CountEAOpenPositions();
+   int count =
+      CountEAOpenPositions();
 
    if(count <= 0)
    {
@@ -1332,7 +1512,10 @@ void ManageBasket()
    double basketProfit =
       GetBasketProfit();
 
-   // Only protect established positive profit
+   //==============================================================
+   // ACTIVATE PROFIT PROTECTION
+   //==============================================================
+
    if(basketProfit > 0.0)
    {
       if(!BasketPeakActive)
@@ -1340,62 +1523,97 @@ void ManageBasket()
          BasketPeakActive = true;
          BasketPeakProfit = basketProfit;
 
-         Print("AXIOM: Basket profit protection activated.");
-         Print("Peak = $",
+         Print("AXIOM: PROFIT PROTECTION ACTIVATED.");
+         Print("Peak profit = $",
                DoubleToString(
                   BasketPeakProfit,2));
       }
 
-      if(basketProfit > BasketPeakProfit)
+      //--- New peak
+      if(basketProfit >
+         BasketPeakProfit)
       {
-         BasketPeakProfit = basketProfit;
+         BasketPeakProfit =
+            basketProfit;
 
-         Print("AXIOM: New basket profit peak = $",
+         Print("AXIOM: NEW PROFIT PEAK = $",
                DoubleToString(
                   BasketPeakProfit,2));
       }
    }
 
-   // Basket target
-   if(basketProfit >= BasketProfitTarget)
+   //==============================================================
+   // FIXED PROFIT TARGET
+   //==============================================================
+
+   if(basketProfit >=
+      BasketProfitTarget)
    {
-      Print("AXIOM: Basket profit target reached.");
-      Print("Basket = $",
+      Print("AXIOM: BASKET TARGET REACHED.");
+      Print("Basket profit = $",
             DoubleToString(
                basketProfit,2));
 
       CloseProfitableBasket();
+
       return;
    }
 
-   // Profit retracement
-   if(UseProfitRetrace &&
-      BasketPeakActive &&
-      BasketPeakProfit > BasketProfitRetrace)
+   //==============================================================
+   // PROFIT RETRACEMENT
+   //==============================================================
+
+   if(!UseProfitRetrace)
+      return;
+
+   if(!BasketPeakActive)
+      return;
+
+   if(BasketPeakProfit <= 0.0)
+      return;
+
+   //--- Fixed money protection
+   double fixedLevel =
+      BasketPeakProfit -
+      BasketProfitRetrace;
+
+   //--- Percentage protection
+   double percentLevel =
+      BasketPeakProfit *
+      (1.0 -
+       BasketProfitRetracePercent /
+       100.0);
+
+   //--- Use the HIGHER protection level.
+   //--- This protects profit sooner.
+   double protectionLevel =
+      MathMax(
+         fixedLevel,
+         percentLevel);
+
+   if(basketProfit <= protectionLevel &&
+      basketProfit > 0.0)
    {
-      double protectionLevel =
-         BasketPeakProfit -
-         BasketProfitRetrace;
+      Print("AXIOM: PROFIT RETRACEMENT TRIGGERED.");
 
-      if(basketProfit <= protectionLevel &&
-         basketProfit > 0.0)
-      {
-         Print("AXIOM: Basket profit retracement triggered.");
-         Print("Peak = $",
-               DoubleToString(
-                  BasketPeakProfit,2));
+      Print("Peak = $",
+            DoubleToString(
+               BasketPeakProfit,2));
 
-         Print("Current = $",
-               DoubleToString(
-                  basketProfit,2));
+      Print("Current = $",
+            DoubleToString(
+               basketProfit,2));
 
-         CloseProfitableBasket();
-      }
+      Print("Protection level = $",
+            DoubleToString(
+               protectionLevel,2));
+
+      CloseProfitableBasket();
    }
 }
 
 //==================================================================
-// CLOSE PROFITABLE POSITIONS
+// CLOSE ONLY PROFITABLE POSITIONS
 //==================================================================
 
 void CloseProfitableBasket()
@@ -1403,17 +1621,27 @@ void CloseProfitableBasket()
    double basketProfit =
       GetBasketProfit();
 
-   // NEVER intentionally close a losing basket
+   //==============================================================
+   // NEVER CLOSE A LOSING BASKET
+   //==============================================================
+
    if(basketProfit <= 0.0)
    {
       Print("AXIOM: Basket is not profitable.");
-      Print("No basket closure performed.");
+      Print("NO PROFIT EXIT PERFORMED.");
+
       return;
    }
 
    bool closedSomething = false;
 
-   for(int i=PositionsTotal()-1; i>=0; i--)
+   //==============================================================
+   // CLOSE PROFITABLE POSITIONS ONLY
+   //==============================================================
+
+   for(int i=PositionsTotal()-1;
+       i>=0;
+       i--)
    {
       ulong ticket =
          PositionGetTicket(i);
@@ -1421,34 +1649,48 @@ void CloseProfitableBasket()
       if(ticket == 0)
          continue;
 
-      if(!PositionSelectByTicket(ticket))
+      if(!PositionSelectByTicket(
+            ticket))
          continue;
 
-      if(PositionGetString(POSITION_SYMBOL)
+      if(PositionGetString(
+            POSITION_SYMBOL)
          != _Symbol)
          continue;
 
       if((long)PositionGetInteger(
-         POSITION_MAGIC) != MagicNumber)
+            POSITION_MAGIC)
+         != MagicNumber)
          continue;
 
       double profit =
          PositionGetDouble(
             POSITION_PROFIT);
 
-      // Only close profitable positions
-      if(profit > 0.0)
-      {
-         if(trade.PositionClose(ticket))
-         {
-            closedSomething = true;
+      //--- VERY IMPORTANT:
+      //--- Losing positions are NOT closed here.
+      if(profit <= 0.0)
+         continue;
 
-            Print("AXIOM: Profitable position closed.");
-            Print("Ticket = ",ticket);
-            Print("Profit = $",
-                  DoubleToString(
-                     profit,2));
-         }
+      if(trade.PositionClose(
+            ticket))
+      {
+         closedSomething = true;
+
+         Print("AXIOM: PROFITABLE POSITION CLOSED.");
+         Print("Ticket = ",ticket);
+
+         Print("Profit = $",
+               DoubleToString(
+                  profit,2));
+      }
+      else
+      {
+         Print("AXIOM: Could not close profitable position.");
+         Print("Ticket = ",ticket);
+
+         Print("Reason = ",
+               trade.ResultRetcodeDescription());
       }
    }
 
@@ -1457,12 +1699,12 @@ void CloseProfitableBasket()
       BasketPeakProfit = 0.0;
       BasketPeakActive = false;
 
-      Print("AXIOM: Profit protection cycle completed.");
+      Print("AXIOM: PROFIT PROTECTION CYCLE COMPLETE.");
    }
 }
 
 //==================================================================
-// POSITION CHECK
+// OUR POSITION CHECK
 //==================================================================
 
 bool IsOurPosition(ulong ticket)
@@ -1470,109 +1712,21 @@ bool IsOurPosition(ulong ticket)
    if(ticket == 0)
       return false;
 
-   if(!PositionSelectByTicket(ticket))
+   if(!PositionSelectByTicket(
+         ticket))
       return false;
 
-   if(PositionGetString(POSITION_SYMBOL)
+   if(PositionGetString(
+         POSITION_SYMBOL)
       != _Symbol)
       return false;
 
    if((long)PositionGetInteger(
-      POSITION_MAGIC) != MagicNumber)
+         POSITION_MAGIC)
+      != MagicNumber)
       return false;
 
    return true;
-}
-
-//==================================================================
-// TRADE TRANSACTION
-//==================================================================
-
-void OnTradeTransaction(
-   const MqlTradeTransaction &trans,
-   const MqlTradeRequest &request,
-   const MqlTradeResult &result
-)
-{
-   if(trans.type != TRADE_TRANSACTION_DEAL_ADD)
-      return;
-
-   ulong deal = trans.deal;
-
-   if(deal == 0)
-      return;
-
-   if(!HistoryDealSelect(deal))
-      return;
-
-   string symbol =
-      HistoryDealGetString(
-         deal,
-         DEAL_SYMBOL);
-
-   if(symbol != _Symbol)
-      return;
-
-   long magic =
-      HistoryDealGetInteger(
-         deal,
-         DEAL_MAGIC);
-
-   if(magic != MagicNumber)
-      return;
-
-   long entry =
-      HistoryDealGetInteger(
-         deal,
-         DEAL_ENTRY);
-
-   if(entry != DEAL_ENTRY_OUT &&
-      entry != DEAL_ENTRY_OUT_BY)
-      return;
-
-   double profit =
-      HistoryDealGetDouble(
-         deal,
-         DEAL_PROFIT);
-
-   double swap =
-      HistoryDealGetDouble(
-         deal,
-         DEAL_SWAP);
-
-   double commission =
-      HistoryDealGetDouble(
-         deal,
-         DEAL_COMMISSION);
-
-   double net =
-      profit +
-      swap +
-      commission;
-
-   if(net < 0.0)
-   {
-      ConsecutiveLosses++;
-
-      Print("AXIOM: Losing trade closed.");
-      Print("Net loss = $",
-            DoubleToString(
-               net,2));
-
-      Print("Consecutive losses = ",
-            ConsecutiveLosses);
-   }
-   else if(net > 0.0)
-   {
-      ConsecutiveLosses = 0;
-
-      Print("AXIOM: Winning trade closed.");
-      Print("Net profit = $",
-            DoubleToString(
-               net,2));
-
-      Print("Loss streak reset.");
-   }
 }
 
 //==================================================================
@@ -1581,7 +1735,8 @@ void OnTradeTransaction(
 
 void LogExpertStatus()
 {
-   datetime now = TimeCurrent();
+   datetime now =
+      TimeCurrent();
 
    if(StatusIntervalSeconds > 0)
    {
@@ -1604,50 +1759,70 @@ void LogExpertStatus()
    int direction =
       GetMarketDirection();
 
-   string dirText = "NEUTRAL";
+   string directionText =
+      "NEUTRAL";
 
    if(direction > 0)
-      dirText = "BUY";
+      directionText = "BUY";
 
    if(direction < 0)
-      dirText = "SELL";
+      directionText = "SELL";
 
    Print(
       "AXIOM STATUS | ",
-      "State=",
-      TradingEnabled ? "STARTED" : "STOPPED",
-      " | Direction=",
-      dirText,
+      "STATE=",
+      TradingEnabled ?
+      "STARTED" :
+      "STOPPED",
+
+      " | DIRECTION=",
+      directionText,
+
       " | BUY=",
-      DoubleToString(buyScore,1),
-      "% | SELL=",
-      DoubleToString(sellScore,1),
-      "% | Positions=",
+      DoubleToString(
+         buyScore,1),
+      "%",
+
+      " | SELL=",
+      DoubleToString(
+         sellScore,1),
+      "%",
+
+      " | POSITIONS=",
       CountEAOpenPositions(),
-      " | Lots=",
+
+      " | LOTS=",
       DoubleToString(
          GetEAOpenLots(),2),
-      " | Basket=$",
+
+      " | BASKET=$",
       DoubleToString(
          basket,2),
-      " | LossStreak=",
-      ConsecutiveLosses
+
+      " | PEAK=$",
+      DoubleToString(
+         BasketPeakProfit,2)
    );
 }
 
 //==================================================================
-// ENTRY BLOCK LOG
+// ENTRY BLOCK MESSAGE
 //==================================================================
 
-void LogEntryBlockReason(string reason)
+void LogEntryBlockReason(
+   string reason
+)
 {
-   datetime now = TimeCurrent();
+   datetime now =
+      TimeCurrent();
 
-   if(now - LastTickLogTime < 3)
+   if(now - LastBlockLogTime < 3)
       return;
 
-   LastTickLogTime = now;
+   LastBlockLogTime = now;
 
-   Print("AXIOM ENTRY WAITING: ",
-         reason);
+   Print(
+      "AXIOM ENTRY WAITING: ",
+      reason
+   );
 }//+------------------------------------------------------------------+
