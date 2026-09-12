@@ -1,98 +1,85 @@
 //+------------------------------------------------------------------+
-//|                  AXIOM REVERSAL 90 EA                            |
-//|                  Version 1.00                                    |
+//|                 AXIOM REVERSAL 90 AI SCANNER                    |
+//|                         M1 LIVE EA                               |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.00"
-#property description "Live M1 90 percent reversal EA"
+#property version   "2.00"
+#property description "Axiom live M1 90-percent reversal scanner"
 
 #include <Trade/Trade.mqh>
 
 CTrade trade;
 
-//==================================================================
-// INPUTS
-//==================================================================
+//============================== INPUTS =============================
 
-input double InpLotSize      = 0.01;       // Lot size per position
-input int    InpMaxPositions = 10;         // Maximum EA positions
-input double InpTrigger      = 90.0;       // Reversal trigger
-input ulong  InpMagicNumber  = 26092026;   // EA magic number
-input int    InpDeviation    = 20;         // Maximum deviation
+input double InpLotSize      = 0.01;
+input int    InpMaxPositions = 10;
+input double InpTrigger      = 90.0;
+input long   InpMagicNumber  = 26092026;
+input int    InpDeviation    = 20;
 
-//==================================================================
-// GLOBAL VARIABLES
-//==================================================================
+//============================== GLOBALS ============================
 
-bool     g_running      = false;
-datetime g_currentBar   = 0;
+bool     g_running       = false;
+datetime g_currentCandle = 0;
 
 double   g_buyPercent  = 50.0;
 double   g_sellPercent = 50.0;
 
-string g_buttonName   = "AXIOM_START_STOP";
-string g_statusName   = "AXIOM_STATUS";
-string g_progressName = "AXIOM_PROGRESS";
+string BUTTON_NAME = "AXIOM_START_STOP";
+string STATUS_NAME = "AXIOM_STATUS";
+string BUY_NAME    = "AXIOM_BUY";
+string SELL_NAME   = "AXIOM_SELL";
+string INFO_NAME   = "AXIOM_INFO";
 
-int g_lastDirection = 0;
-
-//  1  = BUY
-// -1  = SELL
-//  0  = NONE
-
-//==================================================================
-// INITIALIZATION
-//==================================================================
-
+//+------------------------------------------------------------------+
+//| INIT                                                             |
+//+------------------------------------------------------------------+
 int OnInit()
 {
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpDeviation);
 
-   g_currentBar = iTime(_Symbol, PERIOD_M1, 0);
+   g_currentCandle = iTime(_Symbol, PERIOD_M1, 0);
 
    CreateButton();
    CreateStatusObjects();
 
-   Print("==================================================");
-   Print("AXIOM REVERSAL 90 EA INITIALIZED");
-   Print("Symbol: ", _Symbol);
-   Print("Timeframe: M1");
-   Print("Trigger: ", DoubleToString(InpTrigger, 1), "%");
-   Print("Lot size: ", DoubleToString(InpLotSize, 2));
-   Print("Maximum positions: ", InpMaxPositions);
-   Print("Magic number: ", InpMagicNumber);
-   Print("STATUS: STOPPED");
-   Print("Press START to activate trading.");
-   Print("==================================================");
-
-   UpdateChartStatus();
+   Print("================================================");
+   Print("AXIOM REVERSAL 90 AI SCANNER");
+   Print("INITIALIZED");
+   Print("SYMBOL: ", _Symbol);
+   Print("TIMEFRAME: M1");
+   Print("TRIGGER: ", DoubleToString(InpTrigger, 1), "%");
+   Print("MODE: LIVE M1 SCANNING");
+   Print("================================================");
 
    return(INIT_SUCCEEDED);
 }
 
-//==================================================================
-// DEINITIALIZATION
-//==================================================================
-
+//+------------------------------------------------------------------+
+//| DEINIT                                                           |
+//+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   ObjectDelete(0, g_buttonName);
-   ObjectDelete(0, g_statusName);
-   ObjectDelete(0, g_progressName);
+   ObjectDelete(0, BUTTON_NAME);
+   ObjectDelete(0, STATUS_NAME);
+   ObjectDelete(0, BUY_NAME);
+   ObjectDelete(0, SELL_NAME);
+   ObjectDelete(0, INFO_NAME);
 
-   Print("AXIOM REVERSAL 90 EA DEINITIALIZED.");
+   ChartRedraw();
 }
 
-//==================================================================
-// MAIN TICK FUNCTION
-//==================================================================
-
+//+------------------------------------------------------------------+
+//| MAIN TICK                                                        |
+//+------------------------------------------------------------------+
 void OnTick()
 {
    CheckForNewM1Candle();
 
-   CalculateLivePercentages();
+   // Scan current forming candle continuously
+   CalculateAIScanner();
 
    UpdateChartStatus();
 
@@ -104,278 +91,354 @@ void OnTick()
    ProcessReversal();
 }
 
-//==================================================================
-// CHART BUTTON EVENT
-//==================================================================
-
+//+------------------------------------------------------------------+
+//| CHART EVENTS                                                     |
+//+------------------------------------------------------------------+
 void OnChartEvent(const int id,
                   const long &lparam,
                   const double &dparam,
                   const string &sparam)
 {
-   if(id != CHARTEVENT_OBJECT_CLICK)
-      return;
-
-   if(sparam != g_buttonName)
-      return;
-
-   if(g_running)
+   // START / STOP
+   if(id == CHARTEVENT_OBJECT_CLICK)
    {
-      g_running = false;
+      if(sparam == BUTTON_NAME)
+      {
+         g_running = !g_running;
 
-      ObjectSetString(0,
-                      g_buttonName,
-                      OBJPROP_TEXT,
-                      "START");
+         if(g_running)
+         {
+            ObjectSetString(0,
+                            BUTTON_NAME,
+                            OBJPROP_TEXT,
+                            "STOP");
 
-      Print("AXIOM: STOP pressed.");
-      Print("AXIOM: Trading stopped.");
+            Print("AXIOM SCANNER STARTED");
+         }
+         else
+         {
+            ObjectSetString(0,
+                            BUTTON_NAME,
+                            OBJPROP_TEXT,
+                            "START");
+
+            Print("AXIOM SCANNER STOPPED");
+         }
+
+         ChartRedraw();
+      }
    }
-   else
+
+   // Re-center button when chart changes size
+   if(id == CHARTEVENT_CHART_CHANGE)
    {
-      g_running = true;
-
-      ObjectSetString(0,
-                      g_buttonName,
-                      OBJPROP_TEXT,
-                      "STOP");
-
-      Print("AXIOM: START pressed.");
-      Print("AXIOM: Live M1 reversal trading ACTIVATED.");
+      CenterButton();
+      ChartRedraw();
    }
-
-   ObjectSetInteger(0,
-                    g_buttonName,
-                    OBJPROP_STATE,
-                    false);
-
-   ChartRedraw();
 }
 
-//==================================================================
-// CREATE START/STOP BUTTON
-//==================================================================
-
+//+------------------------------------------------------------------+
+//| CREATE BUTTON                                                    |
+//+------------------------------------------------------------------+
 void CreateButton()
 {
-   if(ObjectFind(0, g_buttonName) >= 0)
-      ObjectDelete(0, g_buttonName);
+   if(ObjectFind(0, BUTTON_NAME) >= 0)
+      ObjectDelete(0, BUTTON_NAME);
 
    ObjectCreate(0,
-                g_buttonName,
+                BUTTON_NAME,
                 OBJ_BUTTON,
                 0,
                 0,
                 0);
 
    ObjectSetInteger(0,
-                    g_buttonName,
+                    BUTTON_NAME,
                     OBJPROP_CORNER,
-                    CORNER_RIGHT_UPPER);
+                    CORNER_LEFT_UPPER);
 
    ObjectSetInteger(0,
-                    g_buttonName,
-                    OBJPROP_XDISTANCE,
-                    20);
-
-   ObjectSetInteger(0,
-                    g_buttonName,
-                    OBJPROP_YDISTANCE,
-                    20);
-
-   ObjectSetInteger(0,
-                    g_buttonName,
+                    BUTTON_NAME,
                     OBJPROP_XSIZE,
-                    120);
+                    150);
 
    ObjectSetInteger(0,
-                    g_buttonName,
+                    BUTTON_NAME,
                     OBJPROP_YSIZE,
-                    40);
+                    45);
 
    ObjectSetString(0,
-                   g_buttonName,
+                   BUTTON_NAME,
                    OBJPROP_TEXT,
                    "START");
 
    ObjectSetInteger(0,
-                    g_buttonName,
+                    BUTTON_NAME,
                     OBJPROP_FONTSIZE,
                     12);
 
-   ObjectSetString(0,
-                   g_buttonName,
-                   OBJPROP_FONT,
-                   "Arial");
-
    ObjectSetInteger(0,
-                    g_buttonName,
+                    BUTTON_NAME,
                     OBJPROP_SELECTABLE,
                     false);
+
+   ObjectSetInteger(0,
+                    BUTTON_NAME,
+                    OBJPROP_SELECTED,
+                    false);
+
+   ObjectSetInteger(0,
+                    BUTTON_NAME,
+                    OBJPROP_HIDDEN,
+                    false);
+
+   CenterButton();
 }
 
-//==================================================================
-// CREATE STATUS LABELS
-//==================================================================
+//+------------------------------------------------------------------+
+//| CENTER BUTTON                                                    |
+//+------------------------------------------------------------------+
+void CenterButton()
+{
+   long chartWidth =
+      ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
 
+   long chartHeight =
+      ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
+
+   int buttonWidth  = 150;
+   int buttonHeight = 45;
+
+   int x =
+      (int)((chartWidth - buttonWidth) / 2);
+
+   int y =
+      (int)((chartHeight - buttonHeight) / 2);
+
+   if(x < 0)
+      x = 0;
+
+   if(y < 0)
+      y = 0;
+
+   ObjectSetInteger(0,
+                    BUTTON_NAME,
+                    OBJPROP_XDISTANCE,
+                    x);
+
+   ObjectSetInteger(0,
+                    BUTTON_NAME,
+                    OBJPROP_YDISTANCE,
+                    y);
+}
+
+//+------------------------------------------------------------------+
+//| CREATE STATUS OBJECTS                                            |
+//+------------------------------------------------------------------+
 void CreateStatusObjects()
 {
-   if(ObjectFind(0, g_statusName) >= 0)
-      ObjectDelete(0, g_statusName);
+   CreateLabel(STATUS_NAME, 15, 20, 12);
+   CreateLabel(BUY_NAME,    15, 50, 11);
+   CreateLabel(SELL_NAME,   15, 75, 11);
+   CreateLabel(INFO_NAME,   15, 105, 10);
+}
+
+//+------------------------------------------------------------------+
+//| CREATE LABEL                                                     |
+//+------------------------------------------------------------------+
+void CreateLabel(string name,
+                 int x,
+                 int y,
+                 int fontSize)
+{
+   if(ObjectFind(0, name) >= 0)
+      ObjectDelete(0, name);
 
    ObjectCreate(0,
-                g_statusName,
+                name,
                 OBJ_LABEL,
                 0,
                 0,
                 0);
 
    ObjectSetInteger(0,
-                    g_statusName,
+                    name,
                     OBJPROP_CORNER,
                     CORNER_LEFT_UPPER);
 
    ObjectSetInteger(0,
-                    g_statusName,
+                    name,
                     OBJPROP_XDISTANCE,
-                    15);
+                    x);
 
    ObjectSetInteger(0,
-                    g_statusName,
+                    name,
                     OBJPROP_YDISTANCE,
-                    20);
+                    y);
 
    ObjectSetInteger(0,
-                    g_statusName,
+                    name,
                     OBJPROP_FONTSIZE,
-                    11);
+                    fontSize);
 
    ObjectSetString(0,
-                   g_statusName,
+                   name,
                    OBJPROP_FONT,
                    "Arial");
 
    ObjectSetInteger(0,
-                    g_statusName,
-                    OBJPROP_SELECTABLE,
-                    false);
-
-   if(ObjectFind(0, g_progressName) >= 0)
-      ObjectDelete(0, g_progressName);
-
-   ObjectCreate(0,
-                g_progressName,
-                OBJ_LABEL,
-                0,
-                0,
-                0);
-
-   ObjectSetInteger(0,
-                    g_progressName,
-                    OBJPROP_CORNER,
-                    CORNER_LEFT_UPPER);
-
-   ObjectSetInteger(0,
-                    g_progressName,
-                    OBJPROP_XDISTANCE,
-                    15);
-
-   ObjectSetInteger(0,
-                    g_progressName,
-                    OBJPROP_YDISTANCE,
-                    70);
-
-   ObjectSetInteger(0,
-                    g_progressName,
-                    OBJPROP_FONTSIZE,
-                    11);
-
-   ObjectSetString(0,
-                   g_progressName,
-                   OBJPROP_FONT,
-                   "Arial");
-
-   ObjectSetInteger(0,
-                    g_progressName,
+                    name,
                     OBJPROP_SELECTABLE,
                     false);
 }
 
-//==================================================================
-// NEW M1 CANDLE CHECK
-//==================================================================
-
+//+------------------------------------------------------------------+
+//| NEW M1 CANDLE                                                    |
+//+------------------------------------------------------------------+
 void CheckForNewM1Candle()
 {
-   datetime newBar = iTime(_Symbol, PERIOD_M1, 0);
+   datetime newCandle =
+      iTime(_Symbol, PERIOD_M1, 0);
 
-   if(newBar <= 0)
+   if(newCandle <= 0)
       return;
 
-   if(newBar != g_currentBar)
+   if(newCandle != g_currentCandle)
    {
-      g_currentBar = newBar;
+      g_currentCandle = newCandle;
 
+      // Forget previous candle
       g_buyPercent  = 50.0;
       g_sellPercent = 50.0;
 
-      Print("--------------------------------------------------");
       Print("NEW M1 CANDLE");
-      Print("Previous candle forgotten.");
-      Print("Fresh live calculation started.");
-      Print("--------------------------------------------------");
+      Print("SCANNER RESET FOR CURRENT CANDLE");
    }
 }
 
-//==================================================================
-// LIVE PERCENTAGE CALCULATION
-//==================================================================
-
-void CalculateLivePercentages()
+//+------------------------------------------------------------------+
+//| LIVE AI-STYLE SCANNER                                            |
+//+------------------------------------------------------------------+
+void CalculateAIScanner()
 {
-   double highPrice = iHigh(_Symbol, PERIOD_M1, 0);
-   double lowPrice  = iLow(_Symbol, PERIOD_M1, 0);
+   double open =
+      iOpen(_Symbol, PERIOD_M1, 0);
 
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double high =
+      iHigh(_Symbol, PERIOD_M1, 0);
 
-   if(highPrice <= 0.0 || lowPrice <= 0.0)
+   double low =
+      iLow(_Symbol, PERIOD_M1, 0);
+
+   double bid =
+      SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   if(open <= 0 ||
+      high <= 0 ||
+      low <= 0 ||
+      bid <= 0)
       return;
 
-   double currentPrice = (bid + ask) / 2.0;
+   double range = high - low;
 
-   double range = highPrice - lowPrice;
-
-   if(range <= 0.0)
+   if(range <= 0)
    {
       g_buyPercent  = 50.0;
       g_sellPercent = 50.0;
       return;
    }
 
-   double buyPercent =
-      ((currentPrice - lowPrice) / range) * 100.0;
+   //===============================================================
+   // CURRENT PRICE POSITION
+   //===============================================================
 
-   if(buyPercent < 0.0)
-      buyPercent = 0.0;
+   double locationScore =
+      ((bid - low) / range) * 100.0;
 
-   if(buyPercent > 100.0)
-      buyPercent = 100.0;
+   //===============================================================
+   // CURRENT CANDLE BODY
+   //===============================================================
 
-   g_buyPercent = buyPercent;
+   double body =
+      bid - open;
 
+   double bodyScore =
+      50.0 + (body / range) * 50.0;
+
+   if(bodyScore > 100.0)
+      bodyScore = 100.0;
+
+   if(bodyScore < 0.0)
+      bodyScore = 0.0;
+
+   //===============================================================
+   // LIVE TICK MOMENTUM
+   //===============================================================
+
+   static double previousBid = 0.0;
+
+   double momentumScore = 50.0;
+
+   if(previousBid > 0)
+   {
+      if(bid > previousBid)
+         momentumScore = 75.0;
+
+      else if(bid < previousBid)
+         momentumScore = 25.0;
+   }
+
+   previousBid = bid;
+
+   //===============================================================
+   // SHORT-TERM DIRECTION
+   //===============================================================
+
+   double shortTermScore = 50.0;
+
+   if(bid > open)
+      shortTermScore = 70.0;
+
+   else if(bid < open)
+      shortTermScore = 30.0;
+
+   //===============================================================
+   // WEIGHTED SCANNER
+   //===============================================================
+
+   double buyScore =
+      (locationScore  * 0.35) +
+      (bodyScore      * 0.30) +
+      (momentumScore  * 0.20) +
+      (shortTermScore * 0.15);
+
+   if(buyScore > 100.0)
+      buyScore = 100.0;
+
+   if(buyScore < 0.0)
+      buyScore = 0.0;
+
+   g_buyPercent = buyScore;
+
+   // BUY + SELL = 100%
    g_sellPercent = 100.0 - g_buyPercent;
-}//==================================================================
-// COUNT EA POSITIONS
-//==================================================================
 
+   if(g_sellPercent > 100.0)
+      g_sellPercent = 100.0;
+
+   if(g_sellPercent < 0.0)
+      g_sellPercent = 0.0;
+}//+------------------------------------------------------------------+
+//| COUNT POSITIONS OF ONE TYPE                                      |
+//+------------------------------------------------------------------+
 int CountPositions(ENUM_POSITION_TYPE type)
 {
    int count = 0;
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      ulong ticket = PositionGetTicket(i);
+      ulong ticket =
+         PositionGetTicket(i);
 
       if(ticket == 0)
          continue;
@@ -383,34 +446,38 @@ int CountPositions(ENUM_POSITION_TYPE type)
       if(!PositionSelectByTicket(ticket))
          continue;
 
-      string symbol = PositionGetString(POSITION_SYMBOL);
-      long magic    = PositionGetInteger(POSITION_MAGIC);
-      long posType  = PositionGetInteger(POSITION_TYPE);
+      string symbol =
+         PositionGetString(POSITION_SYMBOL);
 
-      if(symbol != _Symbol)
-         continue;
+      long magic =
+         PositionGetInteger(POSITION_MAGIC);
 
-      if((ulong)magic != InpMagicNumber)
-         continue;
+      ENUM_POSITION_TYPE positionType =
+         (ENUM_POSITION_TYPE)
+         PositionGetInteger(POSITION_TYPE);
 
-      if(posType == (long)type)
+      if(symbol == _Symbol &&
+         magic == InpMagicNumber &&
+         positionType == type)
+      {
          count++;
+      }
    }
 
    return count;
 }
 
-//==================================================================
-// CLOSE ALL EA POSITIONS OF A SPECIFIC TYPE
-//==================================================================
-
-bool ClosePositions(ENUM_POSITION_TYPE type)
+//+------------------------------------------------------------------+
+//| COUNT ALL AXIOM POSITIONS                                        |
+//+------------------------------------------------------------------+
+int CountAllPositions()
 {
-   bool success = true;
+   int count = 0;
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      ulong ticket = PositionGetTicket(i);
+      ulong ticket =
+         PositionGetTicket(i);
 
       if(ticket == 0)
          continue;
@@ -418,147 +485,165 @@ bool ClosePositions(ENUM_POSITION_TYPE type)
       if(!PositionSelectByTicket(ticket))
          continue;
 
-      string symbol = PositionGetString(POSITION_SYMBOL);
-      long magic    = PositionGetInteger(POSITION_MAGIC);
-      long posType  = PositionGetInteger(POSITION_TYPE);
+      string symbol =
+         PositionGetString(POSITION_SYMBOL);
+
+      long magic =
+         PositionGetInteger(POSITION_MAGIC);
+
+      if(symbol == _Symbol &&
+         magic == InpMagicNumber)
+      {
+         count++;
+      }
+   }
+
+   return count;
+}
+
+//+------------------------------------------------------------------+
+//| CLOSE ALL POSITIONS OF TYPE                                      |
+//+------------------------------------------------------------------+
+void ClosePositions(ENUM_POSITION_TYPE type)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket =
+         PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      string symbol =
+         PositionGetString(POSITION_SYMBOL);
+
+      long magic =
+         PositionGetInteger(POSITION_MAGIC);
+
+      ENUM_POSITION_TYPE positionType =
+         (ENUM_POSITION_TYPE)
+         PositionGetInteger(POSITION_TYPE);
 
       if(symbol != _Symbol)
          continue;
 
-      if((ulong)magic != InpMagicNumber)
+      if(magic != InpMagicNumber)
          continue;
 
-      if(posType != (long)type)
+      if(positionType != type)
          continue;
 
       ResetLastError();
 
-      if(!trade.PositionClose(ticket))
+      if(trade.PositionClose(ticket))
       {
-         Print("AXIOM ERROR: Could not close ticket #",
+         Print("AXIOM CLOSED POSITION | TICKET=",
+               ticket);
+      }
+      else
+      {
+         Print("AXIOM CLOSE FAILED | TICKET=",
                ticket,
-               " | Retcode=",
+               " | RETCODE=",
+               trade.ResultRetcode(),
+               " | ",
+               trade.ResultRetcodeDescription());
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| OPEN BUY POSITIONS                                               |
+//+------------------------------------------------------------------+
+void OpenBuyPositions()
+{
+   int current =
+      CountPositions(POSITION_TYPE_BUY);
+
+   int available =
+      InpMaxPositions - current;
+
+   if(available <= 0)
+   {
+      Print("BUY MAX POSITIONS REACHED");
+      return;
+   }
+
+   for(int i = 0; i < available; i++)
+   {
+      ResetLastError();
+
+      if(trade.Buy(InpLotSize,
+                   _Symbol,
+                   0.0,
+                   0.0,
+                   0.0,
+                   "AXIOM BUY"))
+      {
+         Print("AXIOM BUY OPENED | LOT=",
+               DoubleToString(InpLotSize, 2));
+      }
+      else
+      {
+         Print("AXIOM BUY FAILED | RETCODE=",
                trade.ResultRetcode(),
                " | ",
                trade.ResultRetcodeDescription());
 
-         success = false;
-      }
-      else
-      {
-         Print("AXIOM: Closed ticket #", ticket);
+         break;
       }
    }
-
-   return success;
 }
 
-//==================================================================
-// OPEN BUY POSITIONS
-//==================================================================
-
-bool OpenBuyPositions()
+//+------------------------------------------------------------------+
+//| OPEN SELL POSITIONS                                              |
+//+------------------------------------------------------------------+
+void OpenSellPositions()
 {
-   int existingBuys =
-      CountPositions(POSITION_TYPE_BUY);
+   int current =
+      CountPositions(POSITION_TYPE_SELL);
 
-   int amount =
-      InpMaxPositions - existingBuys;
+   int available =
+      InpMaxPositions - current;
 
-   if(amount <= 0)
-      return true;
+   if(available <= 0)
+   {
+      Print("SELL MAX POSITIONS REACHED");
+      return;
+   }
 
-   bool success = true;
-
-   for(int i = 0; i < amount; i++)
+   for(int i = 0; i < available; i++)
    {
       ResetLastError();
 
-      if(!trade.Buy(InpLotSize,
+      if(trade.Sell(InpLotSize,
                     _Symbol,
                     0.0,
                     0.0,
                     0.0,
-                    "Axiom BUY"))
+                    "AXIOM SELL"))
       {
-         Print("AXIOM ERROR: BUY failed.",
-               " Retcode=",
+         Print("AXIOM SELL OPENED | LOT=",
+               DoubleToString(InpLotSize, 2));
+      }
+      else
+      {
+         Print("AXIOM SELL FAILED | RETCODE=",
                trade.ResultRetcode(),
                " | ",
                trade.ResultRetcodeDescription());
 
-         success = false;
          break;
       }
-
-      Print("AXIOM: BUY opened.",
-            " Order=",
-            trade.ResultOrder(),
-            " | Lot=",
-            DoubleToString(InpLotSize, 2));
    }
-
-   if(success)
-      g_lastDirection = 1;
-
-   return success;
 }
 
-//==================================================================
-// OPEN SELL POSITIONS
-//==================================================================
-
-bool OpenSellPositions()
-{
-   int existingSells =
-      CountPositions(POSITION_TYPE_SELL);
-
-   int amount =
-      InpMaxPositions - existingSells;
-
-   if(amount <= 0)
-      return true;
-
-   bool success = true;
-
-   for(int i = 0; i < amount; i++)
-   {
-      ResetLastError();
-
-      if(!trade.Sell(InpLotSize,
-                     _Symbol,
-                     0.0,
-                     0.0,
-                     0.0,
-                     "Axiom SELL"))
-      {
-         Print("AXIOM ERROR: SELL failed.",
-               " Retcode=",
-               trade.ResultRetcode(),
-               " | ",
-               trade.ResultRetcodeDescription());
-
-         success = false;
-         break;
-      }
-
-      Print("AXIOM: SELL opened.",
-            " Order=",
-            trade.ResultOrder(),
-            " | Lot=",
-            DoubleToString(InpLotSize, 2));
-   }
-
-   if(success)
-      g_lastDirection = -1;
-
-   return success;
-}
-
-//==================================================================
-// GET CURRENT EA DIRECTION
-//==================================================================
-
+//+------------------------------------------------------------------+
+//| GET CURRENT POSITION DIRECTION                                   |
+//+------------------------------------------------------------------+
 int GetCurrentDirection()
 {
    int buys =
@@ -576,168 +661,193 @@ int GetCurrentDirection()
    return 0;
 }
 
-//==================================================================
-// PROCESS 90% REVERSAL
-//==================================================================
-
+//+------------------------------------------------------------------+
+//| EXACT 90% REVERSAL ENGINE                                        |
+//+------------------------------------------------------------------+
 void ProcessReversal()
 {
    int direction =
       GetCurrentDirection();
 
    //===============================================================
-   // BUY REACHES 90%
-   // CLOSE BUY -> OPEN SELL
+   // BUY 90% MEANS OPEN SELL
    //===============================================================
 
    if(g_buyPercent >= InpTrigger)
    {
-      if(direction != -1)
+      // Already SELL: keep holding it.
+      if(direction == -1)
+         return;
+
+      // BUY positions exist:
+      // close BUY first, then immediately SELL.
+      if(direction == 1)
       {
-         Print("==================================================");
-         Print("AXIOM 90% SIGNAL: BUY = ",
-               DoubleToString(g_buyPercent, 1),
-               "%");
+         Print("========================================");
+         Print("BUY REACHED 90%");
+         Print("ACTION: CLOSE BUY -> OPEN SELL");
+         Print("========================================");
 
-         Print("AXIOM ACTION: Closing BUY positions...");
+         ClosePositions(POSITION_TYPE_BUY);
 
-         bool closed =
-            ClosePositions(POSITION_TYPE_BUY);
+         // Immediate opposite entry
+         OpenSellPositions();
 
-         if(closed)
-         {
-            Print("AXIOM ACTION: BUY positions closed.");
-            Print("AXIOM ACTION: Opening SELL immediately.");
-
-            OpenSellPositions();
-         }
-         else
-         {
-            Print("AXIOM: BUY closure incomplete.");
-            Print("AXIOM: SELL opening cancelled for this tick.");
-         }
-
-         Print("==================================================");
+         return;
       }
 
-      return;
+      // No positions:
+      // BUY 90 means OPEN SELL.
+      if(direction == 0)
+      {
+         Print("========================================");
+         Print("BUY REACHED 90%");
+         Print("ACTION: OPEN SELL");
+         Print("========================================");
+
+         OpenSellPositions();
+
+         return;
+      }
    }
 
    //===============================================================
-   // SELL REACHES 90%
-   // CLOSE SELL -> OPEN BUY
+   // SELL 90% MEANS OPEN BUY
    //===============================================================
 
    if(g_sellPercent >= InpTrigger)
    {
-      if(direction != 1)
+      // Already BUY: keep holding it.
+      if(direction == 1)
+         return;
+
+      // SELL positions exist:
+      // close SELL first, then immediately BUY.
+      if(direction == -1)
       {
-         Print("==================================================");
-         Print("AXIOM 90% SIGNAL: SELL = ",
-               DoubleToString(g_sellPercent, 1),
-               "%");
+         Print("========================================");
+         Print("SELL REACHED 90%");
+         Print("ACTION: CLOSE SELL -> OPEN BUY");
+         Print("========================================");
 
-         Print("AXIOM ACTION: Closing SELL positions...");
+         ClosePositions(POSITION_TYPE_SELL);
 
-         bool closed =
-            ClosePositions(POSITION_TYPE_SELL);
+         // Immediate opposite entry
+         OpenBuyPositions();
 
-         if(closed)
-         {
-            Print("AXIOM ACTION: SELL positions closed.");
-            Print("AXIOM ACTION: Opening BUY immediately.");
-
-            OpenBuyPositions();
-         }
-         else
-         {
-            Print("AXIOM: SELL closure incomplete.");
-            Print("AXIOM: BUY opening cancelled for this tick.");
-         }
-
-         Print("==================================================");
+         return;
       }
 
-      return;
-   }
-}//==================================================================
-// EXPERTS PROGRESS
-//==================================================================
+      // No positions:
+      // SELL 90 means OPEN BUY.
+      if(direction == 0)
+      {
+         Print("========================================");
+         Print("SELL REACHED 90%");
+         Print("ACTION: OPEN BUY");
+         Print("========================================");
 
+         OpenBuyPositions();
+
+         return;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| SCANNER DIRECTION                                                |
+//+------------------------------------------------------------------+
+string ScannerDirection()
+{
+   if(g_buyPercent >= g_sellPercent)
+      return "BUY";
+
+   return "SELL";
+}//+------------------------------------------------------------------+
+//| PRINT PROGRESS                                                   |
+//+------------------------------------------------------------------+
 void PrintProgress()
 {
-   static datetime lastPrintTime = 0;
+   static datetime lastPrint = 0;
 
-   datetime now = TimeCurrent();
+   datetime now =
+      TimeCurrent();
 
-   // Print approximately once per second.
-   // This prevents the Experts tab from being flooded.
-   if(now == lastPrintTime)
+   // One progress message per second
+   if(now == lastPrint)
       return;
 
-   lastPrintTime = now;
+   lastPrint = now;
 
-   string state = "STOPPED";
+   string direction =
+      ScannerDirection();
 
-   if(g_running)
-      state = "RUNNING";
-
-   int buys =
-      CountPositions(POSITION_TYPE_BUY);
-
-   int sells =
-      CountPositions(POSITION_TYPE_SELL);
-
-   Print("AXIOM | ",
-         state,
-         " | M1 BUY=",
+   Print("AXIOM AI SCANNER | ",
+         "M1 LIVE | ",
+         "BUY=",
          DoubleToString(g_buyPercent, 1),
-         "% | SELL=",
+         "% | ",
+         "SELL=",
          DoubleToString(g_sellPercent, 1),
-         "% | BUY POS=",
-         buys,
-         " | SELL POS=",
-         sells);
+         "% | ",
+         "SCANNER=",
+         direction,
+         " | ",
+         "STATUS=",
+         (g_running ? "RUNNING" : "STOPPED"),
+         " | ",
+         "POSITIONS=",
+         CountAllPositions());
 }
 
-//==================================================================
-// UPDATE CHART STATUS
-//==================================================================
-
+//+------------------------------------------------------------------+
+//| UPDATE CHART STATUS                                              |
+//+------------------------------------------------------------------+
 void UpdateChartStatus()
 {
-   string state = "STOPPED";
+   string direction =
+      ScannerDirection();
 
-   if(g_running)
-      state = "RUNNING";
+   string status;
 
-   string statusText =
-      "AXIOM REVERSAL 90 EA\n"
-      "Symbol: " + _Symbol + "\n"
-      "Timeframe: M1\n"
-      "Status: " + state;
+   if(!g_running)
+      status = "STOPPED - PRESS START";
 
-   ObjectSetString(0,
-                   g_statusName,
-                   OBJPROP_TEXT,
-                   statusText);
-
-   string progressText =
-      "BUY: " +
-      DoubleToString(g_buyPercent, 1) +
-      "%    |    SELL: " +
-      DoubleToString(g_sellPercent, 1) +
-      "%\n"
-      "Trigger: " +
-      DoubleToString(InpTrigger, 1) +
-      "%";
+   else
+      status = "AI SCANNER ACTIVE - LIVE M1";
 
    ObjectSetString(0,
-                   g_progressName,
+                   STATUS_NAME,
                    OBJPROP_TEXT,
-                   progressText);
+                   status);
+
+   ObjectSetString(0,
+                   BUY_NAME,
+                   OBJPROP_TEXT,
+                   "BUY STRENGTH: " +
+                   DoubleToString(g_buyPercent, 1) +
+                   "%");
+
+   ObjectSetString(0,
+                   SELL_NAME,
+                   OBJPROP_TEXT,
+                   "SELL STRENGTH: " +
+                   DoubleToString(g_sellPercent, 1) +
+                   "%");
+
+   ObjectSetString(0,
+                   INFO_NAME,
+                   OBJPROP_TEXT,
+                   "SCANNER: " +
+                   direction +
+                   " | TRIGGER: " +
+                   DoubleToString(InpTrigger, 1) +
+                   "% | M1 LIVE | POSITIONS: " +
+                   IntegerToString(CountAllPositions()));
+
+   ChartRedraw();
 }
 
-//==================================================================
-// END OF AXIOM REVERSAL 90 EA
-//==================================================================
+//+------------------------------------------------------------------+
+//| END                                                              |
+//+------------------------------------------------------------------+
