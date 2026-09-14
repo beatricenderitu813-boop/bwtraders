@@ -1,58 +1,80 @@
 #property strict
-input double FixedLot = 0.10; // 0.10 lot = $1 per $1 move, high risk for $10
-input int TakeProfitPoints = 300; // 30 pips = ~ $3 profit per win
-input int StopLossPoints = 200;   // 20 pips = ~ $2 loss per loss
-input int EMA_Fast = 3;
-input int EMA_Slow = 6;
+input double LotSize = 0.01;
+input double ProfitPerTradeUSD = 0.40;
+input double StopLossPerTradeUSD = 1.00; // NEW: max loss per trade
+input int MaxHoldMinutes = 60; // NEW: close if open > 60 mins
+input int MaxOpenPositions = 2;
+input int EMA_Fast = 9;
+input int EMA_Slow = 21;
 
 int emaFastHandle, emaSlowHandle;
 
 int OnInit()
 {
-   emaFastHandle = iMA(_Symbol, _Period, EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
-   emaSlowHandle = iMA(_Symbol, _Period, EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);
-   Print("=== GAMBLE MODE ON ", _Symbol, " Lot ", FixedLot, " ===");
-   Print("WARNING: This will blow $10 fast if 5 losses in a row!");
+   emaFastHandle = iMA(_Symbol, PERIOD_M1, EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
+   emaSlowHandle = iMA(_Symbol, PERIOD_M1, EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);
+   Print("=== TREND $0.40 + HOURLY SL STARTED ===");
    return(INIT_SUCCEEDED);
 }
 
 void OnTick()
 {
-   if(PositionsTotal() > 0) return;
+   datetime now = TimeCurrent();
+   
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      if(PositionGetSymbol(i)!= _Symbol) continue;
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+      int minutesOpen = (int)((now - openTime)/60);
+
+      bool hitTP = profit >= ProfitPerTradeUSD;
+      bool hitSL = profit <= -StopLossPerTradeUSD;
+      bool hitTime = minutesOpen >= MaxHoldMinutes;
+
+      if(hitTP || hitSL || hitTime)
+      {
+         ulong ticket = PositionGetTicket(i);
+         MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); ZeroMemory(res);
+         req.action = TRADE_ACTION_DEAL;
+         req.symbol = _Symbol;
+         req.volume = PositionGetDouble(POSITION_VOLUME);
+         req.type = (ENUM_ORDER_TYPE)(1 - PositionGetInteger(POSITION_TYPE));
+         req.position = ticket;
+         req.price = (req.type==ORDER_TYPE_BUY)? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         req.deviation = 100;
+         if(OrderSend(req, res))
+         {
+            if(hitTP) Print("TP +$", profit, " closed");
+            if(hitSL) Print("SL -$", profit, " closed");
+            if(hitTime) Print("TIME SL ", minutesOpen, "min +$", profit, " closed");
+         }
+      }
+   }
+
+   int count = 0;
+   for(int i=0; i<PositionsTotal(); i++) if(PositionGetSymbol(i)==_Symbol) count++;
+   if(count >= MaxOpenPositions) return;
 
    double fast[], slow[];
-   ArraySetAsSeries(fast, true);
-   ArraySetAsSeries(slow, true);
-   if(CopyBuffer(emaFastHandle, 0, 0, 3, fast) < 3) return;
-   if(CopyBuffer(emaSlowHandle, 0, 0, 3, slow) < 3) return;
+   ArraySetAsSeries(fast, true); ArraySetAsSeries(slow, true);
+   CopyBuffer(emaFastHandle, 0, 0, 2, fast);
+   CopyBuffer(emaSlowHandle, 0, 0, 2, slow);
 
-   bool buy = fast[1] > slow[1] && fast[2] <= slow[2];
-   bool sell = fast[1] < slow[1] && fast[2] >= slow[2];
+   double openM1 = iOpen(_Symbol, PERIOD_M1, 0);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   bool upTrend = fast[0] > slow[0];
+   bool downTrend = fast[0] < slow[0];
 
-   if(buy) Open(ORDER_TYPE_BUY);
-   if(sell) Open(ORDER_TYPE_SELL);
+   if(upTrend && bid > openM1) Open(ORDER_TYPE_BUY);
+   if(downTrend && bid < openM1) Open(ORDER_TYPE_SELL);
 }
 
 void Open(ENUM_ORDER_TYPE type)
 {
    double price = (type==ORDER_TYPE_BUY)? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double sl = (type==ORDER_TYPE_BUY)? price - StopLossPoints * _Point : price + StopLossPoints * _Point;
-   double tp = (type==ORDER_TYPE_BUY)? price + TakeProfitPoints * _Point : price - TakeProfitPoints * _Point;
-
-   MqlTradeRequest req; MqlTradeResult res;
-   ZeroMemory(req); ZeroMemory(res);
-   req.action = TRADE_ACTION_DEAL;
-   req.symbol = _Symbol;
-   req.volume = FixedLot;
-   req.type = type;
-   req.price = price;
-   req.sl = sl;
-   req.tp = tp;
-   req.deviation = 100;
-
-   Print("GAMBLE ", EnumToString(type), " Lot ", FixedLot);
-   if(!OrderSend(req, res))
-      Print("FAILED ", GetLastError(), " ", res.comment);
-   else
-      Print("OPENED Ticket ", res.order, " Profit target $", TakeProfitPoints * 0.01 * FixedLot * 10);
+   MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); ZeroMemory(res);
+   req.action=TRADE_ACTION_DEAL; req.symbol=_Symbol; req.volume=LotSize;
+   req.type=type; req.price=price; req.deviation=100;
+   OrderSend(req, res);
 }
