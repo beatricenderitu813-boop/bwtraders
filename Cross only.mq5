@@ -1,23 +1,19 @@
 //+------------------------------------------------------------------+
-//|  HIGH PROBABILITY GRAB + TRAIL - 1 Trade, Confidence Filter      |
+//| FINAL - GRAB 50% + RUNNER - CLOSE ONLY ON REVERSAL |
 //+------------------------------------------------------------------+
 #property strict
 input double Lots = 0.01;
 input int FastEMA = 5;
-input int SlowEMA = 13; // 5 & 13 is more stable than 5 & 8
+input int SlowEMA = 13;
 input int ADX_Period = 14;
-input int ADX_Threshold = 25; // Only trade strong trend
-input int TargetPoints = 80;  // First target
-input int TrailStart = 80;    // Start trailing after 80pts
-input int TrailDistance = 40; // Trail by 40pts
-input double MaxDailyLoss = 3.0; // Stop if -$3 today
+input int ADX_Threshold = 25;
+input int FirstTarget = 80;
+input int TrailDistance = 50;
 
 int ema_fast, ema_slow, adx_handle, rsi_handle;
 datetime lastCloseTime=0;
 bool TradingEnabled=true;
-bool isTrailing=false;
-double dailyLoss=0;
-datetime lastDay=0;
+bool halfClosed=false;
 
 int OnInit()
   {
@@ -35,16 +31,11 @@ int OnInit()
    return(INIT_SUCCEEDED);
   }
 void OnDeinit(const int reason){ IndicatorRelease(ema_fast); IndicatorRelease(ema_slow); IndicatorRelease(adx_handle); IndicatorRelease(rsi_handle); ObjectDelete(0,"BTN_TRADE"); Comment(""); }
-void OnChartEvent(const int id,const long &l,const double &d,const string &s){ if(id==CHARTEVENT_OBJECT_CLICK && s=="BTN_TRADE"){ TradingEnabled=!TradingEnabled; if(TradingEnabled){ObjectSetString(0,"BTN_TRADE",OBJPROP_TEXT,"STOP TRADING"); ObjectSetInteger(0,"BTN_TRADE",OBJPROP_BGCOLOR,clrLime);} else{ObjectSetString(0,"BTN_TRADE",OBJPROP_TEXT,"START TRADING"); ObjectSetInteger(0,"BTN_TRADE",OBJPROP_BGCOLOR,clrRed);} ChartRedraw(); } }
+void OnChartEvent(const int id,const long &l,const double &d,const string &s){ if(id==CHARTEVENT_OBJECT_CLICK && s=="BTN_TRADE"){ TradingEnabled=!TradingEnabled; if(TradingEnabled){ ObjectSetString(0,"BTN_TRADE",OBJPROP_TEXT,"STOP TRADING"); ObjectSetInteger(0,"BTN_TRADE",OBJPROP_BGCOLOR,clrLime);} else{ ObjectSetString(0,"BTN_TRADE",OBJPROP_TEXT,"START TRADING"); ObjectSetInteger(0,"BTN_TRADE",OBJPROP_BGCOLOR,clrRed);} ChartRedraw(); } }
 
 void OnTick()
   {
-   // Reset daily loss at new day
-   MqlDateTime tm; TimeToStruct(TimeCurrent(),tm);
-   datetime today=StructToTime(tm); today=today-tm.hour*3600-tm.min*60-tm.sec;
-   if(lastDay!=today){ dailyLoss=0; lastDay=today; }
-
-   double f[],s[],adx[],rsi[]; 
+   double f[],s[],adx[],rsi[];
    if(CopyBuffer(ema_fast,0,0,3,f)!=3) return;
    if(CopyBuffer(ema_slow,0,0,3,s)!=3) return;
    if(CopyBuffer(adx_handle,0,0,3,adx)!=3) return;
@@ -53,62 +44,54 @@ void OnTick()
 
    bool freshBuy = f[2]<=s[2] && f[1]>s[1];
    bool freshSell = f[2]>=s[2] && f[1]<s[1];
+   bool oppositeBuy = f[2]>=s[2] && f[1]<s[1]; // reversal for buy position
+   bool oppositeSell = f[2]<=s[2] && f[1]>s[1]; // reversal for sell position
    double dist=MathAbs(f[1]-s[1])/_Point;
-   double spread=SymbolInfoInteger(_Symbol,SYMBOL_SPREAD)*_Point/_Point;
+   int cnt=CountTrades(); double pts=GetPts();
 
-   int cnt=CountTrades(); double pts=GetPts(); double money=GetMoney();
    bool strongTrend = adx[1] > ADX_Threshold && dist > 30;
-   bool rsiOK_Buy = rsi[1] < 70 && rsi[1] > 50;
-   bool rsiOK_Sell = rsi[1] > 30 && rsi[1] < 50;
+   bool reversalDetected = adx[1]<20 || (cnt>0 && PositionIsBuy() && rsi[1]<52) || (cnt>0 &&!PositionIsBuy() && rsi[1]>48);
 
-   Comment("=== HIGH CONFIDENCE BOT ===\n","Trend:",(f[1]>s[1]?"BUY":"SELL")," Dist:",DoubleToString(dist,1)," ADX:",DoubleToString(adx[1],1),"\n",
-           "Strong:",(strongTrend?"YES 80%":"NO - SKIP")," RSI:",DoubleToString(rsi[1],1),"\n",
-           "Trades:",cnt,"/1 Profit:",DoubleToString(pts,1),"pts $",DoubleToString(money,2),"\n",
-           "Daily Loss $",DoubleToString(dailyLoss,2),"/",DoubleToString(MaxDailyLoss,2),"\n",
-           "Mode:",(isTrailing?"TRAILING - letting it run":"WAITING FOR 80pts"));
+   Comment("=== FINAL GRAB+RUNNER ===\n","Trend:",(f[1]>s[1]?"BUY":"SELL")," ADX:",DoubleToString(adx[1],1)," Dist:",DoubleToString(dist,1),"\n",
+           "Trades:",cnt,"/2 Profit:",DoubleToString(pts,1),"pts HalfClosed:",(halfClosed?"YES":"NO"),"\n",
+           "Mode:",(cnt==0?"WAITING FOR CROSS":!halfClosed?"WAITING FOR 80pts TO GRAB":!reversalDetected?"RUNNER - LETTING IT RUN - NO REVERSAL":"REVERSAL DETECTED - WILL CLOSE"),"\n",
+           "Rule: Close FULLY only on reversal");
 
-   // Risk Management
-   if(dailyLoss >= MaxDailyLoss){ Comment("DAILY LOSS LIMIT REACHED - STOPPED FOR TODAY"); return; }
-   if(spread > 400){ Comment("SPREAD TOO HIGH - SKIP"); return; } // Gold spread filter
    if(!TradingEnabled) return;
    if(cnt>=1)
      {
-      // SMART CLOSE LOGIC: Don't close if strong trend continues
-      if(pts >= TrailStart && strongTrend)
+      // STEP 1: Grab half at 80pts
+      if(!halfClosed && pts>=FirstTarget && cnt==2)
         {
-         isTrailing=true; // Keep running, trail later
-         // Close only if momentum weakens: RSI reverses or ADX drops
-         if((f[1]>s[1] && rsi[1]<55) || (f[1]<s[1] && rsi[1]>45) || adx[1]<20)
-           { CloseAll(); isTrailing=false; lastCloseTime=TimeCurrent(); }
+         CloseOneTrade(); // Grab 1
+         halfClosed=true;
          return;
         }
-      if(pts >= TargetPoints && !isTrailing)
-        { CloseAll(); isTrailing=false; lastCloseTime=TimeCurrent(); return; }
+      // STEP 2: Keep runner until REVERSAL ONLY
+      if(halfClosed)
+        {
+         if((PositionIsBuy() && oppositeBuy) || (!PositionIsBuy() && oppositeSell) || reversalDetected)
+           { CloseAll(); halfClosed=false; lastCloseTime=TimeCurrent(); return; }
+         return; // Don't close, let it run
+        }
       return;
      }
 
-   isTrailing=false;
-   if(TimeCurrent()-lastCloseTime < 60) return; // 1 min cooldown
-   if(!freshBuy && !freshSell) return;
-   if(!strongTrend) return; // 80% filter - skip weak trends
+   // No trades - wait for fresh cross
+   if(TimeCurrent()-lastCloseTime < 60) return;
+   if(!freshBuy &&!freshSell) return;
+   if(!strongTrend) return;
+   if(CountTrades()>=2) return;
 
-   if(freshBuy && rsiOK_Buy){ OpenOne(ORDER_TYPE_BUY); }
-   else if(freshSell && rsiOK_Sell){ OpenOne(ORDER_TYPE_SELL); }
+   // Open 2 trades = 0.01+0.01
+   halfClosed=false;
+   if(freshBuy && rsi[1]<70 && rsi[1]>50){ OpenTwo(ORDER_TYPE_BUY); }
+   else if(freshSell && rsi[1]>30 && rsi[1]<50){ OpenTwo(ORDER_TYPE_SELL); }
   }
 
-void OpenOne(ENUM_ORDER_TYPE type)
-  {
-   if(CountTrades()>=1) return; // CRITICAL FIX: Never open 6 at once
-   MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req);
-   double price=(type==ORDER_TYPE_BUY)? SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID);
-   req.action=TRADE_ACTION_DEAL; req.symbol=_Symbol; req.volume=Lots; req.type=type; req.price=price; req.deviation=30; req.magic=20260915;
-   if(!OrderSend(req,res)) Print("Order failed ",GetLastError());
-  }
+void OpenTwo(ENUM_ORDER_TYPE type){ for(int i=0;i<2;i++){ if(CountTrades()>=2) return; MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); double price=(type==ORDER_TYPE_BUY)? SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID); req.action=TRADE_ACTION_DEAL; req.symbol=_Symbol; req.volume=Lots; req.type=type; req.price=price; req.deviation=30; req.magic=20260915; if(!OrderSend(req,res)) Print("Fail ",GetLastError()); Sleep(300);} }
 int CountTrades(){ int c=0; for(int i=PositionsTotal()-1;i>=0;i--){ ulong t=PositionGetTicket(i); if(t!=0 && PositionGetString(POSITION_SYMBOL)==_Symbol && PositionGetInteger(POSITION_MAGIC)==20260915) c++; } return(c); }
+bool PositionIsBuy(){ for(int i=PositionsTotal()-1;i>=0;i--){ ulong t=PositionGetTicket(i); if(t!=0 && PositionGetString(POSITION_SYMBOL)==_Symbol) return(PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY); } return(false); }
 double GetPts(){ double tot=0; int cnt=0; for(int i=PositionsTotal()-1;i>=0;i--){ ulong t=PositionGetTicket(i); if(t==0) continue; if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue; double o=PositionGetDouble(POSITION_PRICE_OPEN); double cu=PositionGetDouble(POSITION_PRICE_CURRENT); long ty=PositionGetInteger(POSITION_TYPE); tot+= (ty==POSITION_TYPE_BUY)? (cu-o)/_Point : (o-cu)/_Point; cnt++; } return(cnt>0?tot/cnt:0); }
-double GetMoney(){ double p=0; for(int i=PositionsTotal()-1;i>=0;i--){ ulong t=PositionGetTicket(i); if(t!=0 && PositionGetString(POSITION_SYMBOL)==_Symbol) p+=PositionGetDouble(POSITION_PROFIT); } return(p); }
-void CloseAll()
-  { 
-   double profitBefore=GetMoney();
-   for(int i=PositionsTotal()-1;i>=0;i--){ ulong t=PositionGetTicket(i); if(t==0) continue; if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue; MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); req.action=TRADE_ACTION_DEAL; req.symbol=_Symbol; req.volume=PositionGetDouble(POSITION_VOLUME); req.type=(ENUM_ORDER_TYPE)(1-PositionGetInteger(POSITION_TYPE)); req.price=(req.type==ORDER_TYPE_BUY)? SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID); req.deviation=30; req.position=t; if(!OrderSend(req,res)) Print("Close fail ",GetLastError()); else { if(profitBefore<0) dailyLoss+=MathAbs(profitBefore); } } 
-  }
+void CloseOneTrade(){ for(int i=PositionsTotal()-1;i>=0;i--){ ulong t=PositionGetTicket(i); if(t==0) continue; if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue; MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); req.action=TRADE_ACTION_DEAL; req.symbol=_Symbol; req.volume=PositionGetDouble(POSITION_VOLUME); req.type=(ENUM_ORDER_TYPE)(1-PositionGetInteger(POSITION_TYPE)); req.price=(req.type==ORDER_TYPE_BUY)? SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID); req.deviation=30; req.position=t; if(OrderSend(req,res)){ Print("GRABBED 50% PROFIT - Runner kept"); return; } } }
+void CloseAll(){ for(int i=PositionsTotal()-1;i>=0;i--){ ulong t=PositionGetTicket(i); if(t==0) continue; if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue; MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); req.action=TRADE_ACTION_DEAL; req.symbol=_Symbol; req.volume=PositionGetDouble(POSITION_VOLUME); req.type=(ENUM_ORDER_TYPE)(1-PositionGetInteger(POSITION_TYPE)); req.price=(req.type==ORDER_TYPE_BUY)? SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID); req.deviation=30; req.position=t; OrderSend(req,res); } }
