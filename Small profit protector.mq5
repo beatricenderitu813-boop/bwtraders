@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| ULTRA FAST 5&8 + BUTTON - CLEAN NO ERRORS |
+//| ULTRA FAST 5&8 + BUTTON - 0 ERRORS 0 WARNINGS |
 //+------------------------------------------------------------------+
 #property strict
 
@@ -101,4 +101,74 @@ void OpenTwo(ENUM_ORDER_TYPE type)
      {
       MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req);
       double price=(type==ORDER_TYPE_BUY)? SymbolInfoDouble(_Symbol,SYMBOL_ASK) : SymbolInfoDouble(_Symbol,SYMBOL_BID);
-      req.action=TRADE_ACTION_DEAL
+      req.action=TRADE_ACTION_DEAL;
+      req.symbol=_Symbol;
+      req.volume=Lots;
+      req.type=type;
+      req.price=price;
+      req.deviation=30;
+      req.magic=1111;
+      if(!OrderSend(req,res))
+         Print("OrderSend failed: ",GetLastError());
+      Sleep(150);
+     }
+  }
+//+------------------------------------------------------------------+
+int CountTrades()
+  {
+   int c=0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+     {
+      ulong t=PositionGetTicket(i);
+      if(t!=0 && PositionGetString(POSITION_SYMBOL)==_Symbol) c++;
+     }
+   return(c);
+  }
+//+------------------------------------------------------------------+
+double GetPts()
+  {
+   double tot=0; int cnt=0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+     {
+      ulong t=PositionGetTicket(i); if(t==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      double o=PositionGetDouble(POSITION_PRICE_OPEN);
+      double cu=PositionGetDouble(POSITION_PRICE_CURRENT);
+      long ty=PositionGetInteger(POSITION_TYPE);
+      if(ty==POSITION_TYPE_BUY) tot+=(cu-o)/_Point;
+      else tot+=(o-cu)/_Point;
+      cnt++;
+     }
+   return(cnt>0?tot/cnt:0);
+  }
+//+------------------------------------------------------------------+
+double GetMoney()
+  {
+   double p=0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+     {
+      ulong t=PositionGetTicket(i);
+      if(t!=0 && PositionGetString(POSITION_SYMBOL)==_Symbol) p+=PositionGetDouble(POSITION_PROFIT);
+     }
+   return(p);
+  }
+//+------------------------------------------------------------------+
+void CloseAll()
+  {
+   for(int i=PositionsTotal()-1;i>=0;i--)
+     {
+      ulong t=PositionGetTicket(i); if(t==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req);
+      req.action=TRADE_ACTION_DEAL;
+      req.symbol=_Symbol;
+      req.volume=PositionGetDouble(POSITION_VOLUME);
+      req.type=(ENUM_ORDER_TYPE)(1-PositionGetInteger(POSITION_TYPE));
+      req.price=(req.type==ORDER_TYPE_BUY)? SymbolInfoDouble(_Symbol,SYMBOL_ASK) : SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      req.deviation=30;
+      req.position=t;
+      if(!OrderSend(req,res))
+         Print("Close failed: ",GetLastError());
+     }
+  }
+//+------------------------------------------------------------------+
